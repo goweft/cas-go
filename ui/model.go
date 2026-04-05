@@ -218,6 +218,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.submitMessage()
 
+	case tea.KeySpace:
+		if m.focus == FocusChat && !m.streaming {
+			m.input += " "
+		}
+		return m, nil
+
 	case tea.KeyBackspace:
 		if m.focus == FocusChat && len(m.input) > 0 {
 			runes := []rune(m.input)
