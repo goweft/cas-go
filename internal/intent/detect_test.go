@@ -37,12 +37,22 @@ func TestDetectEdit(t *testing.T) {
 		"fix the introduction",
 		"rewrite the summary",
 		"improve the conclusion",
+		// These were broken before the noun-list expansion:
+		"add error handling",
+		"add file input support",
+		"add logging to the function",
+		"add a validation step",
+		"add type annotations",
+		"add an example",
+		"add test coverage",
+		"improve error messages",
+		"fix the error handling",
 	}
 	for _, msg := range cases {
 		t.Run(msg, func(t *testing.T) {
 			got := intent.Detect(msg)
 			if got.Kind != intent.KindEdit {
-				t.Errorf("expected KindEdit, got %q", got.Kind)
+				t.Errorf("expected KindEdit, got %q for message %q", got.Kind, msg)
 			}
 		})
 	}
@@ -61,7 +71,7 @@ func TestDetectSelfEdit(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			got := intent.Detect(msg)
 			if got.Kind != intent.KindChat {
-				t.Errorf("expected KindChat (self-edit), got %q", got.Kind)
+				t.Errorf("expected KindChat (self-edit), got %q for %q", got.Kind, msg)
 			}
 		})
 	}
@@ -88,20 +98,44 @@ func TestDetectChat(t *testing.T) {
 		"hello",
 		"how are you",
 		"what can you do",
+		"add me a coffee",         // "add" without edit-target noun → chat
+		"add it to my grocery list", // ambiguous but no workspace context
 	}
 	for _, msg := range cases {
 		t.Run(msg, func(t *testing.T) {
 			got := intent.Detect(msg)
 			if got.Kind != intent.KindChat {
-				t.Errorf("expected KindChat, got %q", got.Kind)
+				t.Errorf("expected KindChat, got %q for %q", got.Kind, msg)
 			}
 		})
+	}
+}
+
+func TestSelfEditBeforeEditPattern(t *testing.T) {
+	// "edit it directly" contains the word "edit" which matches _EDIT_PATTERNS[0]
+	// but _SELF_EDIT_PATTERNS must be checked first — result must be KindChat
+	got := intent.Detect("edit it directly")
+	if got.Kind != intent.KindChat {
+		t.Errorf("self-edit exclusion must take priority over edit patterns, got %q", got.Kind)
 	}
 }
 
 func TestTitleHint(t *testing.T) {
 	got := intent.Detect("write a project proposal for Q3")
 	if got.TitleHint == "" {
-		t.Error("expected non-empty TitleHint")
+		t.Error("expected non-empty TitleHint for create intent")
+	}
+}
+
+func TestTitleHintAbsentForNonCreate(t *testing.T) {
+	cases := []string{"hello", "add a section", "close the workspace"}
+	for _, msg := range cases {
+		got := intent.Detect(msg)
+		if got.Kind == intent.KindCreate {
+			continue // only check non-create
+		}
+		if got.TitleHint != "" {
+			t.Errorf("expected empty TitleHint for %q (%s), got %q", msg, got.Kind, got.TitleHint)
+		}
 	}
 }
