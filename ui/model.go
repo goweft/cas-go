@@ -13,6 +13,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -155,6 +157,9 @@ func (m Model) InputCursor() int { return m.inputCursor }
 // CurrentFocus returns the current focus state (for testing).
 func (m Model) CurrentFocus() Focus { return m.focus }
 
+// Status returns the current status bar text (for testing).
+func (m Model) Status() string { return m.status }
+
 func (m Model) Init() tea.Cmd { return tea.WindowSize() }
 
 // ── Update ────────────────────────────────────────────────────────
@@ -276,6 +281,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnd, tea.KeyCtrlE:
 		if m.focus == FocusChat {
 			m.inputCursor = len([]rune(m.input))
+		} else if m.focus == FocusWorkspace && !m.streaming &&
+			m.activeTab < len(m.tabs) && m.tabs[m.activeTab].ws != nil {
+			// Ctrl+E in workspace focus = export to file
+			tab := m.tabs[m.activeTab]
+			exportPath, err := ExportWorkspace(tab.title, tab.wsType, tab.content)
+			if err != nil {
+				m.status = "export failed: " + err.Error()
+			} else {
+				m.status = "exported → " + exportPath
+			}
 		}
 		return m, nil
 
@@ -836,6 +851,7 @@ func (m Model) renderStatus() string {
 		return "  " + strings.Join([]string{
 			styleDim.Render("[/]: tabs"),
 			styleDim.Render("e: edit"),
+			styleDim.Render("ctrl+e: export"),
 			styleDim.Render("ctrl+z: undo"),
 			styleDim.Render("↑↓/pgup/pgdn: scroll"),
 			styleDim.Render("tab: chat"),
@@ -899,6 +915,85 @@ func deleteWord(input string, cursor int) (string, int) {
 	result = append(result, runes[:i]...)
 	result = append(result, runes[cursor:]...)
 	return string(result), i
+}
+
+// exportWorkspace writes content to ~/cas-exports/{title}.{ext}.
+// Returns the absolute path written, or an error.
+func ExportWorkspace(title, wsType, content string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, "cas-exports")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+
+	// Sanitize title for use as filename
+	safe := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' ||
+			r == '"' || r == '<' || r == '>' || r == '|' {
+			return '-'
+		}
+		return r
+	}, title)
+	if safe == "" {
+		safe = "untitled"
+	}
+	if len(safe) > 64 {
+		safe = safe[:64]
+	}
+
+	ext := ExportExt(wsType, content)
+	filename := safe + ext
+	full := filepath.Join(dir, filename)
+
+	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+		return "", err
+	}
+	return full, nil
+}
+
+// exportExt returns the file extension for the given workspace type.
+// For code workspaces it sniffs the content for common language markers.
+func ExportExt(wsType, content string) string {
+	switch wsType {
+	case "code":
+		// Sniff language from content
+		c := strings.ToLower(content[:min(len(content), 512)])
+		switch {
+		case strings.Contains(c, "import python") ||
+			strings.Contains(c, "def ") ||
+			strings.Contains(c, "#!/usr/bin/env python") ||
+			strings.HasPrefix(strings.TrimSpace(c), "import ") && strings.Contains(c, "print("):
+			return ".py"
+		case strings.Contains(c, "package main") ||
+			strings.Contains(c, "func main()") ||
+			strings.Contains(c, "import ("):
+			return ".go"
+		case strings.Contains(c, "#!/bin/bash") ||
+			strings.Contains(c, "#!/bin/sh") ||
+			strings.Contains(c, "#!/usr/bin/env bash"):
+			return ".sh"
+		case strings.Contains(c, "function ") && strings.Contains(c, "const "):
+			return ".js"
+		case strings.Contains(c, "def ") && strings.Contains(c, "end"):
+			return ".rb"
+		default:
+			return ".txt"
+		}
+	case "list":
+		return ".md"
+	default: // document
+		return ".md"
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func wordWrap(text string, width int) []string {
