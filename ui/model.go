@@ -1,5 +1,11 @@
 // Package ui implements the CAS terminal interface using Bubble Tea.
-// Layout: split panel — chat input/history on the left, workspace on the right.
+//
+// Layout: split panel — chat (40%) on the left, workspace (60%) on the right.
+//
+// Streaming pattern: a channel stored in Model feeds one token per tea.Cmd
+// tick into the event loop. This is the correct Bubble Tea approach — a
+// goroutine fills the channel, a recursive cmd drains it one item at a time,
+// and a final responseMsg signals completion.
 package ui
 
 import (
@@ -7,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/glamour"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/goweft/cas/internal/intent"
@@ -14,68 +21,60 @@ import (
 	"github.com/goweft/cas/internal/workspace"
 )
 
-// ── Styles ────────────────────────────────────────────────────────
+// ── Palette ───────────────────────────────────────────────────────
 
 var (
-	subtle    = lipgloss.AdaptiveColor{Light: "#D9DCCF", Dark: "#383838"}
-	highlight = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
-	special   = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
-	dimmed    = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
+	colBorder    = lipgloss.AdaptiveColor{Light: "#C8C6C0", Dark: "#383838"}
+	colActive    = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
+	colWorkspace = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
+	colDim       = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
 
-	panelStyle = lipgloss.NewStyle().
+	stylePanel = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(subtle).
+			BorderForeground(colBorder).
 			Padding(0, 1)
 
-	activePanelStyle = lipgloss.NewStyle().
+	styleActivePanel = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(highlight).
+				BorderForeground(colActive).
 				Padding(0, 1)
 
-	workspacePanelStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(special).
-				Padding(0, 1)
+	styleWSPanel = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colWorkspace).
+			Padding(0, 1)
 
-	titleStyle = lipgloss.NewStyle().
-			Foreground(highlight).
-			Bold(true)
-
-	wsTypeStyle = lipgloss.NewStyle().
-			Foreground(special).
-			Italic(true)
-
-	dimStyle = lipgloss.NewStyle().
-			Foreground(dimmed)
-
-	userMsgStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#79c0ff"))
-
-	shellMsgStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7ee787"))
-
-	inputStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#e6edf3"))
-
-	statusStyle = lipgloss.NewStyle().
-			Foreground(dimmed).
-			Italic(true)
+	styleTitle  = lipgloss.NewStyle().Foreground(colActive).Bold(true)
+	styleWSType = lipgloss.NewStyle().Foreground(colWorkspace).Italic(true)
+	styleDim    = lipgloss.NewStyle().Foreground(colDim)
+	styleUser   = lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff"))
+	styleShell  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7ee787"))
+	styleInput  = lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3"))
+	styleStatus = lipgloss.NewStyle().Foreground(colDim).Italic(true)
+	styleCode   = lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3"))
 )
 
-// ── Messages ──────────────────────────────────────────────────────
+// ── Stream event ─────────────────────────────────────────────────
+// streamEvent is a discriminated union sent over the stream channel.
+// Either Token is set (mid-stream) or Resp/Err are set (final).
 
-// tokenMsg carries a streamed token from the LLM.
+type streamEvent struct {
+	Token string
+	Resp  *shell.StreamResponse
+	Err   error
+}
+
+// ── Tea messages ──────────────────────────────────────────────────
+
 type tokenMsg string
 
-// responseMsg carries the final shell response.
 type responseMsg struct {
 	resp *shell.StreamResponse
 	err  error
 }
 
-// ── Model ─────────────────────────────────────────────────────────
+// ── Focus ─────────────────────────────────────────────────────────
 
-// Focus tracks which panel the user is interacting with.
 type Focus int
 
 const (
@@ -83,34 +82,37 @@ const (
 	FocusWorkspace Focus = iota
 )
 
-// Model is the Bubble Tea model for CAS.
+// ── Model ─────────────────────────────────────────────────────────
+
 type Model struct {
 	sh        *shell.Shell
 	sessionID string
 
-	// Chat state
-	messages    []shell.Message
-	input       string
-	inputCursor int
+	// Chat
+	messages   []shell.Message
+	input      string
+	chatScroll int // how many lines scrolled up in chat history
 
-	// Workspace state
-	activeWS    *workspace.Workspace
-	wsContent   string   // displayed content (may be streaming)
-	wsScroll    int      // line scroll offset in workspace pane
-	streaming   bool
-	streamBuf   strings.Builder
+	// Workspace
+	activeWS  *workspace.Workspace
+	wsContent string // raw accumulated content (may be mid-stream)
+	wsScroll  int    // line offset in workspace pane
+
+	// Streaming
+	streaming bool
+	streamBuf strings.Builder
+	streamCh  chan streamEvent // non-nil while streaming
 
 	// Layout
 	width  int
 	height int
 	focus  Focus
 
-	// Status
+	// Status / error
 	status string
-	err    error
 }
 
-// New creates a new CAS UI model.
+// New returns a model seeded with existing history and active workspace.
 func New(sh *shell.Shell, sessionID string, history []shell.Message, activeWS *workspace.Workspace) Model {
 	m := Model{
 		sh:        sh,
@@ -125,7 +127,6 @@ func New(sh *shell.Shell, sessionID string, history []shell.Message, activeWS *w
 	return m
 }
 
-// Init satisfies tea.Model.
 func (m Model) Init() tea.Cmd { return nil }
 
 // ── Update ────────────────────────────────────────────────────────
@@ -142,32 +143,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tokenMsg:
+		// One token arrived — update display and schedule reading the next
 		m.streamBuf.WriteString(string(msg))
 		m.wsContent = m.streamBuf.String()
-		return m, nil
+		return m, listenStream(m.streamCh)
 
 	case responseMsg:
+		// Stream complete
 		m.streaming = false
+		m.streamCh = nil
 		m.status = ""
 		if msg.err != nil {
-			m.err = msg.err
 			m.status = "error: " + msg.err.Error()
 			return m, nil
 		}
 		resp := msg.resp
-		// Append shell reply to history
 		m.messages = append(m.messages, shell.Message{
 			Role: "shell", Text: resp.ChatReply,
 		})
 		if resp.Workspace != nil {
 			m.activeWS = resp.Workspace
 			m.wsContent = resp.Workspace.Content
-			m.streamBuf.Reset()
+			m.wsScroll = 0
 		}
 		if resp.Intent == intent.KindClose {
 			m.activeWS = nil
 			m.wsContent = ""
 		}
+		m.streamBuf.Reset()
 		return m, nil
 	}
 
@@ -177,11 +180,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
 		return m, tea.Quit
 
+	case tea.KeyEsc:
+		if m.focus == FocusWorkspace {
+			m.focus = FocusChat
+		} else {
+			return m, tea.Quit
+		}
+		return m, nil
+
 	case tea.KeyTab:
-		// Toggle focus between chat and workspace
 		if m.focus == FocusChat {
 			m.focus = FocusWorkspace
 		} else {
@@ -197,20 +207,44 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyBackspace:
 		if m.focus == FocusChat && len(m.input) > 0 {
-			m.input = m.input[:len(m.input)-1]
+			runes := []rune(m.input)
+			m.input = string(runes[:len(runes)-1])
 		}
 		return m, nil
 
 	case tea.KeyUp:
-		if m.focus == FocusWorkspace && m.wsScroll > 0 {
-			m.wsScroll--
+		switch m.focus {
+		case FocusWorkspace:
+			if m.wsScroll > 0 {
+				m.wsScroll--
+			}
+		case FocusChat:
+			if m.chatScroll < len(m.messages) {
+				m.chatScroll++
+			}
 		}
 		return m, nil
 
 	case tea.KeyDown:
-		if m.focus == FocusWorkspace {
+		switch m.focus {
+		case FocusWorkspace:
 			m.wsScroll++
+		case FocusChat:
+			if m.chatScroll > 0 {
+				m.chatScroll--
+			}
 		}
+		return m, nil
+
+	case tea.KeyPgUp:
+		m.wsScroll -= 10
+		if m.wsScroll < 0 {
+			m.wsScroll = 0
+		}
+		return m, nil
+
+	case tea.KeyPgDown:
+		m.wsScroll += 10
 		return m, nil
 
 	case tea.KeyRunes:
@@ -223,6 +257,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// submitMessage sends the input to the shell and sets up the stream loop.
 func (m Model) submitMessage() (Model, tea.Cmd) {
 	message := strings.TrimSpace(m.input)
 	m.input = ""
@@ -230,31 +265,41 @@ func (m Model) submitMessage() (Model, tea.Cmd) {
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.wsContent = ""
+	m.wsScroll = 0
 	m.status = "thinking…"
+
+	// Buffered channel — goroutine never blocks on slow event loop
+	ch := make(chan streamEvent, 512)
+	m.streamCh = ch
 
 	sessionID := m.sessionID
 	sh := m.sh
 
-	return m, func() tea.Msg {
-		// Channel to collect tokens
-		tokens := make(chan string, 256)
-		var resp *shell.StreamResponse
-		var respErr error
+	go func() {
+		resp, err := sh.StreamMessage(
+			context.Background(), sessionID, message,
+			func(token string) { ch <- streamEvent{Token: token} },
+		)
+		ch <- streamEvent{Resp: resp, Err: err}
+		close(ch)
+	}()
 
-		go func() {
-			resp, respErr = sh.StreamMessage(
-				context.Background(), sessionID, message,
-				func(token string) { tokens <- token },
-			)
-			close(tokens)
-		}()
+	return m, listenStream(ch)
+}
 
-		// Drain tokens — each becomes a tokenMsg
-		// We batch them to avoid flooding the event loop
-		// In practice, Bubble Tea's event loop handles this fine
-		_ = tokens // handled via tea.Batch below
-		// Return the final response; tokens arrive via separate msgs
-		return responseMsg{resp: resp, err: respErr}
+// listenStream returns a tea.Cmd that reads exactly one event from ch.
+// Called recursively from Update until the stream closes.
+func listenStream(ch chan streamEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			// Channel closed without sending a final event — shouldn't happen
+			return responseMsg{err: fmt.Errorf("stream closed unexpectedly")}
+		}
+		if ev.Resp != nil || ev.Err != nil {
+			return responseMsg{resp: ev.Resp, err: ev.Err}
+		}
+		return tokenMsg(ev.Token)
 	}
 }
 
@@ -265,132 +310,219 @@ func (m Model) View() string {
 		return "Loading…"
 	}
 
-	// Split width: 40% chat, 60% workspace (min 20 each)
+	// 40% chat, 60% workspace, leaving 2 chars between panels
 	chatW := m.width * 40 / 100
-	wsW := m.width - chatW - 4 // 4 for borders/gap
-	if chatW < 24 {
-		chatW = 24
+	wsW := m.width - chatW - 2
+	if chatW < 28 {
+		chatW = 28
 	}
-	if wsW < 24 {
-		wsW = 24
+	if wsW < 28 {
+		wsW = 28
 	}
-	innerH := m.height - 6 // leave room for borders + input + status
+	innerH := m.height - 4
 
 	chatPane := m.renderChat(chatW, innerH)
 	wsPane := m.renderWorkspace(wsW, innerH)
+	row := lipgloss.JoinHorizontal(lipgloss.Top, chatPane, " ", wsPane)
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, chatPane, "  ", wsPane)
-	statusBar := m.renderStatus()
-
-	return lipgloss.JoinVertical(lipgloss.Left, row, statusBar)
+	return lipgloss.JoinVertical(lipgloss.Left, row, m.renderStatus())
 }
 
 func (m Model) renderChat(w, h int) string {
-	style := panelStyle
+	st := stylePanel
 	if m.focus == FocusChat {
-		style = activePanelStyle
+		st = styleActivePanel
 	}
-	style = style.Width(w)
+	st = st.Width(w - 2) // subtract border
 
-	// History
+	// Build message lines (newest last)
 	var lines []string
 	for _, msg := range m.messages {
+		wrapped := wordWrap(msg.Text, w-6)
 		if msg.Role == "user" {
-			lines = append(lines, userMsgStyle.Render("you › ")+msg.Text)
+			for i, l := range wrapped {
+				if i == 0 {
+					lines = append(lines, styleUser.Render("you › ")+l)
+				} else {
+					lines = append(lines, "      "+l)
+				}
+			}
 		} else {
-			lines = append(lines, shellMsgStyle.Render("cas › ")+msg.Text)
+			for i, l := range wrapped {
+				if i == 0 {
+					lines = append(lines, styleShell.Render("cas › ")+l)
+				} else {
+					lines = append(lines, "      "+l)
+				}
+			}
 		}
-		lines = append(lines, "") // blank between messages
+		lines = append(lines, "")
 	}
 
-	// Trim to visible height
-	histH := h - 3
+	// Input area takes 2 lines at bottom
+	histH := h - 5
 	if histH < 0 {
 		histH = 0
 	}
-	if len(lines) > histH {
-		lines = lines[len(lines)-histH:]
-	}
-	histText := strings.Join(lines, "\n")
 
-	// Input line
+	// Apply chat scroll (scroll up = show older messages)
+	total := len(lines)
+	end := total - m.chatScroll
+	if end < 0 {
+		end = 0
+	}
+	start := end - histH
+	if start < 0 {
+		start = 0
+	}
+	visible := lines[start:end]
+	// Pad to fill height
+	for len(visible) < histH {
+		visible = append([]string{""}, visible...)
+	}
+
 	cursor := "█"
 	if m.streaming {
-		cursor = "…"
+		cursor = styleDim.Render("…")
 	}
-	inputLine := inputStyle.Render("> " + m.input + cursor)
+	inputLine := styleInput.Render("> " + m.input + cursor)
 
-	content := histText + "\n\n" + inputLine
-	return style.Render(content)
+	sep := styleDim.Render(strings.Repeat("─", w-4))
+	content := strings.Join(visible, "\n") + "\n" + sep + "\n" + inputLine
+	return st.Render(content)
 }
 
 func (m Model) renderWorkspace(w, h int) string {
-	style := workspacePanelStyle.Width(w)
+	st := styleWSPanel.Width(w - 2)
 
-	if m.activeWS == nil && m.wsContent == "" {
-		empty := dimStyle.Render(
+	if m.activeWS == nil && !m.streaming {
+		hint := styleDim.Render(
 			"No workspace open.\n\n" +
-				"Try: write a project proposal\n" +
-				"     create a python script\n" +
-				"     make a todo list",
+				"  write a project proposal\n" +
+				"  create a python script\n" +
+				"  make a todo list",
 		)
-		return style.Render(empty)
+		return st.Render(hint)
 	}
 
-	// Title bar
-	title := "Workspace"
+	// Header
+	title := "generating…"
 	wsType := ""
 	if m.activeWS != nil {
 		title = m.activeWS.Title
 		wsType = m.activeWS.Type
 	}
-	header := titleStyle.Render(title)
+	header := styleTitle.Render(title)
 	if wsType != "" {
-		header += "  " + wsTypeStyle.Render("["+wsType+"]")
+		header += "  " + styleWSType.Render("["+wsType+"]")
+	}
+	sep := styleDim.Render(strings.Repeat("─", w-4))
+
+	// Content — render markdown for document/list, raw for code
+	contentArea := h - 3 // header + sep + padding
+	body := m.renderContent(wsType, m.wsContent, w-4, contentArea)
+
+	return st.Render(header + "\n" + sep + "\n" + body)
+}
+
+// renderContent applies glamour markdown for documents and lists,
+// raw monospace for code, with scroll offset applied.
+func (m Model) renderContent(wsType, content string, w, h int) string {
+	if content == "" {
+		if m.streaming {
+			return styleDim.Render("generating…")
+		}
+		return ""
 	}
 
-	// Content — scroll
-	content := m.wsContent
-	if m.streaming && content == "" {
-		content = dimStyle.Render("generating…")
-	}
-	contentLines := strings.Split(content, "\n")
-	start := m.wsScroll
-	if start >= len(contentLines) {
-		start = 0
-	}
-	visibleLines := contentLines[start:]
-	maxLines := h - 2
-	if len(visibleLines) > maxLines {
-		visibleLines = visibleLines[:maxLines]
+	var rendered string
+	if wsType == "code" {
+		// Raw code — monospace, no markdown processing
+		rendered = styleCode.Render(content)
+	} else {
+		// Markdown via glamour
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(w),
+		)
+		if err == nil {
+			if out, err := renderer.Render(content); err == nil {
+				rendered = strings.TrimRight(out, "\n")
+			} else {
+				rendered = content
+			}
+		} else {
+			rendered = content
+		}
 	}
 
-	body := strings.Join(visibleLines, "\n")
-	return style.Render(header + "\n" + dimStyle.Render(strings.Repeat("─", w-4)) + "\n" + body)
+	lines := strings.Split(rendered, "\n")
+
+	// Clamp scroll
+	maxScroll := len(lines) - h
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := m.wsScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+
+	end := scroll + h
+	if end > len(lines) {
+		end = len(lines)
+	}
+	visible := lines[scroll:end]
+
+	// Scroll indicator
+	if len(lines) > h {
+		pct := 0
+		if maxScroll > 0 {
+			pct = scroll * 100 / maxScroll
+		}
+		indicator := styleDim.Render(fmt.Sprintf(" ↕ %d%% ", pct))
+		if len(visible) > 0 {
+			visible[len(visible)-1] = indicator
+		}
+	}
+
+	return strings.Join(visible, "\n")
 }
 
 func (m Model) renderStatus() string {
 	if m.status != "" {
-		return statusStyle.Render(" " + m.status)
+		return styleStatus.Render(" " + m.status)
 	}
-	parts := []string{
-		dimStyle.Render("tab: switch pane"),
-		dimStyle.Render("enter: send"),
-		dimStyle.Render("ctrl+c: quit"),
+	hints := []string{
+		styleDim.Render("tab: switch panel"),
+		styleDim.Render("↑↓: scroll"),
+		styleDim.Render("enter: send"),
+		styleDim.Render("ctrl+c: quit"),
 	}
-	if m.focus == FocusWorkspace {
-		parts = append([]string{dimStyle.Render("↑↓: scroll  ")}, parts...)
-	}
-	return "  " + strings.Join(parts, "  │  ")
+	return "  " + strings.Join(hints, "  │  ")
 }
 
-// StreamTokenCmd returns a tea.Cmd that sends a single tokenMsg.
-// Used to feed streamed tokens into the event loop.
-func StreamTokenCmd(token string) tea.Cmd {
-	return func() tea.Msg { return tokenMsg(token) }
-}
+// ── Helpers ───────────────────────────────────────────────────────
 
-// ErrorMsg formats an error for display.
-func ErrorMsg(err error) string {
-	return fmt.Sprintf("error: %v", err)
+// wordWrap splits text into lines of at most width runes.
+func wordWrap(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+
+	var lines []string
+	line := words[0]
+	for _, w := range words[1:] {
+		if len(line)+1+len(w) <= width {
+			line += " " + w
+		} else {
+			lines = append(lines, line)
+			line = w
+		}
+	}
+	return append(lines, line)
 }
