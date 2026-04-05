@@ -82,7 +82,7 @@ func init() {
 
 	editPatterns = []*regexp.Regexp{
 		ci(`(?i)\b(?:edit|update|change|modify|revise|rewrite|append|insert|remove|delete|expand|shorten|rename)\b`),
-		ci(`(?i)\badd\b.{0,60}\b(?:section|paragraph|part|chapter|bullet|point|entry|item|row|function|method|class)\b`),
+		ci(`(?i)\badd\b.{0,60}\b(?:section|paragraph|part|chapter|bullet|point|entry|item|row|function|method|class|feature|support|handling|validation|test|logging|error|comment|type|field|parameter|argument|example|case|check|step)\b`),
 		ci(`(?i)\b(?:fix|improve|clean\s+up|polish|proofread|refactor|optimise|optimize)\b`),
 	}
 

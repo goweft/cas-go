@@ -114,7 +114,8 @@ type Model struct {
 	editDirty bool // content changed since last save
 
 	// Streaming
-	streaming bool
+	streaming     bool
+	streamIntent  string // "create_workspace" | "edit_workspace" | "chat" — set at submit
 	streamBuf string  // plain string — Builder must not be copied (Model is a value type)
 	streamCh  chan streamEvent
 
@@ -170,7 +171,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tokenMsg:
 		m.streamBuf += string(msg)
-		if m.activeTab < len(m.tabs) {
+		// Only route tokens to the workspace tab for create/edit intents.
+		// Chat responses should never overwrite workspace content.
+		if m.streamIntent != "chat" && m.activeTab < len(m.tabs) {
 			m.tabs[m.activeTab].content = m.streamBuf
 		}
 		return m, listenStream(m.streamCh)
@@ -418,6 +421,7 @@ func (m Model) submitMessage() (Model, tea.Cmd) {
 	m.messages = append(m.messages, shell.Message{Role: "user", Text: message})
 	m.streaming = true
 	m.streamBuf = ""
+	m.streamIntent = string(in.Kind)
 	m.status = "thinking…"
 
 	if in.Kind == intent.KindCreate {
