@@ -137,7 +137,9 @@ func New(sh *shell.Shell, sessionID string, history []shell.Message, workspaces 
 		sh:        sh,
 		sessionID: sessionID,
 		messages:  history,
-		focus:     FocusChat,
+		focus:  FocusChat,
+		width:  80,  // sensible default until WindowSizeMsg arrives
+		height: 24,
 	}
 	for _, ws := range workspaces {
 		m.tabs = append(m.tabs, tabFromWorkspace(ws))
@@ -623,9 +625,6 @@ func (m Model) handleResponse(msg responseMsg) (Model, tea.Cmd) {
 // ── View ──────────────────────────────────────────────────────────
 
 func (m Model) View() string {
-	if m.width == 0 {
-		return "cas — starting…"
-	}
 
 	chatW := m.width * 40 / 100
 	wsW := m.width - chatW - 2
