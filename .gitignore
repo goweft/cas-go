@@ -1,4 +1,4 @@
-cas
+/cas
 *.db
 *.db-wal
 *.db-shm
