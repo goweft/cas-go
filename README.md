@@ -256,23 +256,6 @@ The directory is created automatically if it doesn't exist.
 
 ---
 
-## Part of the WEFT Ecosystem
-
-CAS is the human interface layer of the WEFT stack:
-
-| Project | What it does |
-|---|---|
-| **[heddle](https://github.com/goweft/heddle)** | MCP mesh runtime — optional trust enforcement + audit logging for CAS |
-| **[tenter](https://github.com/goweft/tenter)** | Pre-publish artifact scanner (Python, GitHub Marketplace) |
-| **[tenter-rs](https://github.com/goweft/tenter-rs)** | tenter v2 — Rust static binary |
-| **[unshear](https://github.com/goweft/unshear)** | Fork divergence detector — finds stripped safety mechanisms |
-| **[ratine](https://github.com/goweft/ratine)** | Agent memory poisoning detection |
-| **[crocking](https://github.com/goweft/crocking)** | AI authorship detection |
-
-CAS runs standalone. Heddle integration is optional and adds trust tiers, credential brokering, and tamper-evident audit logging.
-
----
-
 ## References
 
 Shneiderman & Maes (1997). "Direct Manipulation vs. Interface Agents." *Interactions, 4(6).*
