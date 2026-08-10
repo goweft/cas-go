@@ -12,7 +12,8 @@
   <a href="#see-it-work">See It Work</a> &nbsp;·&nbsp;
   <a href="#how-it-works">How It Works</a> &nbsp;·&nbsp;
   <a href="#keyboard-reference">Keys</a> &nbsp;·&nbsp;
-  <a href="#quick-start">Quick Start</a>
+  <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
+  <a href="#writing">Writing</a>
 </p>
 
 <p align="center">
@@ -236,10 +237,13 @@ internal/
 └── conductor/   Behavioral learning — observe, profile, user_context
 ui/              Bubble Tea TUI: split panel, tabs, streaming, inline edit
 tests/tui/       TUI integration tests (spawn real binary via tmux)
-cmd/cas/         Entry point: --db, --memory flags
+cmd/cas/         Entry point: --db, --memory, --providers, --version flags
 ```
 
-**245 tests** across all packages. **8 TUI integration tests** that spawn the real binary in tmux and interact with it as a user would — catching runtime bugs that unit tests miss.
+**243 tests** across all packages. **8 TUI integration tests** that spawn the real binary in tmux and interact with it as a user would — catching runtime bugs that unit tests miss.
+
+For the design rationale behind this layout — why the shell makes no LLM calls, how contracts
+are enforced, how workspaces are modelled — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
@@ -396,6 +400,15 @@ TUI_INTEGRATION=1 go test -v -tags=integration ./tests/tui/ -timeout 300s
 The directory is created automatically if it doesn't exist.
 
 ---
+
+## Writing
+
+Long-form background on the design, in order:
+
+- [I Replaced My AI Chat Interface With a Terminal Shell](https://dev.to/goweft/i-replaced-my-ai-chat-interface-with-a-terminal-shell-5aoh)
+  — why a terminal shell, and how conversation and direct manipulation share one window.
+- [Seven Agents, Zero Trust: How I Made an Agentic Shell Safe by Design](https://dev.to/goweft/seven-agents-zero-trust-how-i-made-an-agentic-shell-safe-by-design-3ed6)
+  — the safety model: named agents, frozen contracts, fail-closed enforcement, the autonomy dial.
 
 ## References
 
