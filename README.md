@@ -20,6 +20,9 @@
   <a href="https://github.com/goweft/cas/actions/workflows/ci.yml">
     <img src="https://github.com/goweft/cas/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
+  <a href="https://github.com/goweft/cas/releases/latest">
+    <img src="https://img.shields.io/github/v/release/goweft/cas" alt="Latest release">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0">
   </a>
