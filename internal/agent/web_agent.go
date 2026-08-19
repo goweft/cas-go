@@ -4,14 +4,17 @@
 // summarise, navigate to a linked page, answer questions — and acts
 // according to the autonomy dial. Like MCPAgent, it never leaves its
 // workspace scope: its contract enforces that navigation stays within the
-// session's origin or follows a link present on the current page, and the
-// check runs before any fetch — an out-of-scope URL is never requested.
+// session's origin or follows a public link present on the current page,
+// checked before any fetch — and the same rule is applied to every
+// redirect hop before that hop is requested, so a permitted URL cannot
+// bounce the agent somewhere the plan could not have named.
 package agent
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -84,7 +87,12 @@ func (a *WebAgent) Act(ctx context.Context, req WebRequest) (*WebResult, error) 
 		if err := a.contract(req, plan.navigateURL).CheckPostconditions(); err != nil {
 			return nil, err
 		}
-		newPage, err := req.Session.Fetch(ctx, plan.navigateURL)
+		newPage, err := req.Session.FetchWithPolicy(ctx, plan.navigateURL, func(u *url.URL) error {
+			if !navigateURLInScope(req, u.String()) {
+				return fmt.Errorf("out of navigation scope")
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, fmt.Errorf("web-agent: navigate: %w", err)
 		}
@@ -250,7 +258,7 @@ func (a *WebAgent) contract(req WebRequest, navigateURL string) *contract.Contra
 		},
 		{
 			Name:        "navigate_url_in_scope",
-			Description: "navigate_url must share the session's origin or be a link on the current page",
+			Description: "navigate_url must share the session's origin or be a public link on the current page",
 			Check: func() bool {
 				if navigateURL == "" {
 					return true
@@ -262,31 +270,73 @@ func (a *WebAgent) contract(req WebRequest, navigateURL string) *contract.Contra
 	return c.Freeze()
 }
 
-// navigateURLInScope reports whether a planned navigation target is
-// permitted: it must share the session's start-URL origin (scheme + host)
-// or appear verbatim among the current page's extracted links (which the
-// webview layer resolves to absolute URLs). The contract runs this before
-// any fetch, so out-of-scope URLs are refused without a request. A URL
-// that merely appears in page text — the prompt-injection channel — is
-// neither, and fails closed.
+// navigateURLInScope reports whether a navigation target is permitted.
+// The rule, applied to the plan and to every redirect hop:
+//
+//   - scheme must be http or https;
+//   - same origin (scheme + host) as the session's start URL is always
+//     allowed — the user chose that host, private or not;
+//   - otherwise the URL must appear verbatim among the current page's
+//     extracted links AND point at a public target: a link whose host is
+//     localhost or a private/loopback/link-local IP literal is refused
+//     unless it is the session's own hostname. Page markup is
+//     attacker-controllable; an <a href> must not be able to aim the
+//     agent at internal services.
+//
+// Hostname targets that *resolve* to internal addresses are caught at
+// dial time by the webview policy client's non-public guard; this
+// predicate handles what is decidable from the URL alone. A URL that
+// merely appears in page text — the prompt-injection channel — matches
+// nothing here and fails closed.
 func navigateURLInScope(req WebRequest, target string) bool {
 	u, err := url.Parse(target)
 	if err != nil || !u.IsAbs() {
 		return false
 	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	var start *url.URL
 	if req.Session != nil {
-		if start, err := url.Parse(req.Session.StartURL); err == nil &&
-			strings.EqualFold(u.Scheme, start.Scheme) &&
-			strings.EqualFold(u.Host, start.Host) {
-			return true
+		if s, err := url.Parse(req.Session.StartURL); err == nil {
+			start = s
 		}
 	}
+	if start != nil &&
+		strings.EqualFold(u.Scheme, start.Scheme) &&
+		strings.EqualFold(u.Host, start.Host) {
+		return true
+	}
+	linked := false
 	if req.PageState != nil {
 		for _, l := range req.PageState.Links {
 			if l.Href == target {
-				return true
+				linked = true
+				break
 			}
 		}
 	}
-	return false
+	if !linked {
+		return false
+	}
+	if privateHostLiteral(u.Hostname()) {
+		return start != nil && strings.EqualFold(u.Hostname(), start.Hostname())
+	}
+	return true
+}
+
+// privateHostLiteral reports whether a hostname is, on its face, a
+// non-public target: localhost, *.localhost, or an IP literal in the
+// loopback, private, link-local, multicast, or unspecified ranges.
+func privateHostLiteral(hostname string) bool {
+	h := strings.ToLower(hostname)
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }

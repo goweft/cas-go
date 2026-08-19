@@ -17,9 +17,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -70,8 +72,29 @@ func NewSession(_ context.Context, startURL string) (*Session, error) {
 	}, nil
 }
 
+// FetchPolicy authorizes each URL a policy-checked fetch may touch: the
+// initial target and every redirect hop, evaluated before the request for
+// that hop is sent. Returning an error aborts the chain with that hop
+// unrequested. A nil policy means an unrestricted (user-initiated) fetch.
+type FetchPolicy func(*url.URL) error
+
 // Fetch retrieves and parses the given URL, updating the session's current URL.
+// Redirects are followed freely — this is the user-initiated path.
 func (s *Session) Fetch(ctx context.Context, targetURL string) (*PageState, error) {
+	return s.FetchWithPolicy(ctx, targetURL, nil)
+}
+
+// FetchWithPolicy retrieves and parses the given URL under a FetchPolicy.
+// The policy is applied to the initial URL and, via CheckRedirect, to every
+// redirect hop before that hop's request goes out. Policy-checked fetches
+// also refuse connections that resolve to non-public addresses, except to
+// the session's own start host (which the user chose); this holds even when
+// a public hostname resolves to an internal address.
+//
+// The recorded page URL and the session's CurrentURL are the final URL
+// after redirects, so relative links resolve against the page that was
+// actually served.
+func (s *Session) FetchWithPolicy(ctx context.Context, targetURL string, policy FetchPolicy) (*PageState, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webview fetch %s: %w", targetURL, err)
@@ -79,7 +102,15 @@ func (s *Session) Fetch(ctx context.Context, targetURL string) (*PageState, erro
 	req.Header.Set("User-Agent", "CAS/0.1 (Conversational Agent Shell)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
 
-	resp, err := s.client.Do(req)
+	client := s.client
+	if policy != nil {
+		if err := policy(req.URL); err != nil {
+			return nil, fmt.Errorf("webview: refused %s: %w", targetURL, err)
+		}
+		client = s.policyClient(policy)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("webview fetch %s: %w", targetURL, err)
 	}
@@ -94,12 +125,73 @@ func (s *Session) Fetch(ctx context.Context, targetURL string) (*PageState, erro
 		return nil, fmt.Errorf("webview read body: %w", err)
 	}
 
-	ps, err := parseHTML(targetURL, body)
+	finalURL := resp.Request.URL.String()
+	ps, err := parseHTML(finalURL, body)
 	if err != nil {
 		return nil, err
 	}
-	s.CurrentURL = targetURL
+	s.CurrentURL = finalURL
 	return ps, nil
+}
+
+// policyClient clones the session client with per-hop redirect validation
+// and a dialer that refuses non-public destinations other than the
+// session's own start host.
+func (s *Session) policyClient(policy FetchPolicy) *http.Client {
+	trusted := hostOnly(s.StartURL)
+	plain := &net.Dialer{Timeout: 10 * time.Second}
+	guarded := &net.Dialer{Timeout: 10 * time.Second, Control: refuseNonPublic}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+			}
+			if trusted != "" && strings.EqualFold(host, trusted) {
+				return plain.DialContext(ctx, network, addr)
+			}
+			return guarded.DialContext(ctx, network, addr)
+		},
+	}
+	return &http.Client{
+		Timeout:   s.client.Timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return policy(req.URL)
+		},
+	}
+}
+
+// hostOnly returns the lowercased hostname (no port) of a raw URL.
+func hostOnly(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// refuseNonPublic rejects dials whose resolved address is loopback,
+// private, link-local, multicast, or unspecified. It runs after DNS
+// resolution, so a public hostname that resolves to an internal address
+// (DNS rebinding) is refused too.
+func refuseNonPublic(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("webview: bad dial address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("webview: unresolved dial address %q", address)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return fmt.Errorf("webview: refusing connection to non-public address %s", ip)
+	}
+	return nil
 }
 
 // Navigate fetches the start URL and returns the page state.

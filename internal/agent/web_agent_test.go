@@ -141,29 +141,98 @@ func TestWebAgentAllowsSameOriginNavigate(t *testing.T) {
 	}
 }
 
-// TestWebAgentAllowsPageLinkedNavigate: a cross-origin URL is permitted
-// when it is an actual link on the current page — the rule the system
-// prompt has always stated, now enforced.
-func TestWebAgentAllowsPageLinkedNavigate(t *testing.T) {
-	target, hits := targetServer(t)
-	doc := target.URL + "/doc"
-	fakeLLMPlan(t, fmt.Sprintf(`{"action":"navigate","navigate_url":%q}`, doc))
+// TestWebAgentRefusesPrivateLinkedTarget: a page link is attacker
+// markup — an <a href> pointing at localhost or a private IP must not
+// authorize the agent to fetch internal services. Refused at the
+// contract, before any dial.
+func TestWebAgentRefusesPrivateLinkedTarget(t *testing.T) {
+	steal := "http://127.0.0.1:1/steal"
+	fakeLLMPlan(t, fmt.Sprintf(`{"action":"navigate","navigate_url":%q}`, steal))
 
 	page := &webview.PageState{
 		URL:   "https://cas.example/page",
-		Links: []webview.Link{{Text: "docs", Href: doc}},
+		Links: []webview.Link{{Text: "totally safe", Href: steal}},
 	}
 	req := newWebRequest(t, "https://cas.example/", page)
 
 	a := agent.NewWebAgent()
 	res, err := a.Act(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "navigate_url_in_scope") {
+		t.Fatalf("expected navigate_url_in_scope violation for private linked target, got: %v", err)
+	}
+	if res != nil {
+		t.Errorf("expected nil result on refusal, got %+v", res)
+	}
+}
+
+// TestWebAgentRefusesOffScopeRedirect: an in-scope URL must not be able
+// to bounce the agent out of scope. The redirect hop is validated before
+// its request is sent — the off-scope server sees zero hits.
+func TestWebAgentRefusesOffScopeRedirect(t *testing.T) {
+	outside, outsideHits := targetServer(t)
+
+	var originHits atomic.Int64
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, outside.URL+"/x", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	nav := origin.URL + "/go"
+	fakeLLMPlan(t, fmt.Sprintf(`{"action":"navigate","navigate_url":%q}`, nav))
+
+	page := &webview.PageState{URL: origin.URL, Text: "a page"}
+	req := newWebRequest(t, origin.URL, page)
+
+	a := agent.NewWebAgent()
+	res, err := a.Act(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "out of navigation scope") {
+		t.Fatalf("expected scope refusal on redirect hop, got: %v", err)
+	}
+	if res != nil {
+		t.Errorf("expected nil result on refusal, got %+v", res)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin should be fetched exactly once (the 302), got %d", got)
+	}
+	if got := outsideHits.Load(); got != 0 {
+		t.Errorf("off-scope redirect target was fetched %d time(s); the hop must be refused unrequested", got)
+	}
+}
+
+// TestWebAgentRecordsFinalURLAfterRedirect: permitted same-origin
+// redirects still work under the policy client, and the resulting page
+// state carries the URL that was actually served, not the one requested.
+func TestWebAgentRecordsFinalURLAfterRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/b", http.StatusFound)
+	})
+	mux.HandleFunc("/b", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>final</title></head><body><p>done</p></body></html>`)
+	})
+
+	nav := srv.URL + "/a"
+	fakeLLMPlan(t, fmt.Sprintf(`{"action":"navigate","navigate_url":%q}`, nav))
+
+	page := &webview.PageState{URL: srv.URL, Text: "a page"}
+	req := newWebRequest(t, srv.URL, page)
+
+	a := agent.NewWebAgent()
+	res, err := a.Act(context.Background(), req)
 	if err != nil {
-		t.Fatalf("page-linked navigate refused: %v", err)
+		t.Fatalf("same-origin redirect refused: %v", err)
 	}
 	if res == nil || res.NewPage == nil {
 		t.Fatal("expected fetched page state")
 	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("expected exactly 1 fetch, got %d", got)
+	if want := srv.URL + "/b"; res.NewPage.URL != want {
+		t.Errorf("page URL is %q, want post-redirect %q", res.NewPage.URL, want)
+	}
+	if res.NewPage.Title != "final" {
+		t.Errorf("expected title %q, got %q", "final", res.NewPage.Title)
 	}
 }
