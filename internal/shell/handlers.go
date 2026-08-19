@@ -169,7 +169,7 @@ func (sh *Shell) handleRun(ctx context.Context, sess *Session) (*Response, error
 	}
 	if strings.TrimSpace(ws.Content) == "" {
 		return &Response{
-			ChatReply: "Workspace is empty — nothing to run.",
+			ChatReply: fmt.Sprintf("Workspace %q is empty — nothing to run.", ws.Title),
 			Workspace: ws,
 			Intent:    intent.KindRun,
 		}, nil
@@ -178,14 +178,14 @@ func (sh *Shell) handleRun(ctx context.Context, sess *Session) (*Response, error
 	result, err := runner.Run(ctx, ws.Content, runner.DefaultTimeout)
 	if err != nil {
 		return &Response{
-			ChatReply: fmt.Sprintf("Run failed: %v", err),
+			ChatReply: fmt.Sprintf("Run of %q failed: %v", ws.Title, err),
 			Workspace: ws,
 			Intent:    intent.KindRun,
 		}, nil
 	}
 
 	return &Response{
-		ChatReply: runner.FormatResult(result),
+		ChatReply: fmt.Sprintf("Workspace %q: %s", ws.Title, runner.FormatResult(result)),
 		Workspace: ws,
 		Intent:    intent.KindRun,
 	}, nil

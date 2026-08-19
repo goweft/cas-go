@@ -36,7 +36,7 @@ func (sh *Shell) handleIngest(ctx context.Context, sess *Session, in intent.Inte
 
 	sh.mcpConns[ws.ID] = conn
 
-	reply := fmt.Sprintf("Connected to %s — %d tool(s) available. Ask me to use any of them.", serverURL, len(conn.Tools))
+	reply := fmt.Sprintf("Connected to %s — %d tool(s) available. Tools run as orchestration steps — say \"use this server to <task>\".", serverURL, len(conn.Tools))
 	return &Response{ChatReply: reply, Workspace: ws, Intent: intent.KindIngest}, nil
 }
 
