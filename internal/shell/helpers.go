@@ -44,9 +44,31 @@ func toStoreMsg(m Message) store.MessageRow {
 	}
 }
 
-func sessionHistory(sess *Session) []llm.Message {
-	out := make([]llm.Message, 0, len(sess.History))
-	for _, m := range sess.History {
+// chatHistoryWindow bounds the turns sent as chat context. It matches the
+// truncation inside llm.BuildChatMessages, and keeps the ChatAgent's
+// history_not_excessive precondition (max 20) satisfiable no matter how
+// long a session grows.
+const chatHistoryWindow = 6
+
+// chatHistory returns the conversation context for the chat agents.
+//
+// The router appends the current user message to sess.History before
+// dispatching (so the message is persisted even if the turn fails), which
+// means the final entry is the in-flight message. It is excluded here
+// because the agents receive the current message separately — including
+// it would send it to the model twice. The rest is truncated to the most
+// recent chatHistoryWindow entries.
+func chatHistory(sess *Session) []llm.Message {
+	h := sess.History
+	if len(h) == 0 {
+		return nil
+	}
+	h = h[:len(h)-1] // drop the in-flight message (passed separately)
+	if len(h) > chatHistoryWindow {
+		h = h[len(h)-chatHistoryWindow:]
+	}
+	out := make([]llm.Message, 0, len(h))
+	for _, m := range h {
 		role := "assistant"
 		if m.Role == "user" {
 			role = "user"

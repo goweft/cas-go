@@ -2,9 +2,14 @@ package shell_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/goweft/cas/internal/intent"
@@ -472,5 +477,108 @@ func TestCombineNeedsTwoWorkspaces(t *testing.T) {
 	}
 	if !strings.Contains(resp.ChatReply, "at least 2") {
 		t.Errorf("expected 'at least 2' message with 1 workspace, got %q", resp.ChatReply)
+	}
+}
+
+// ── Long-session chat (regression: history contract + duplication) ─
+
+// fakeOllamaChat stands in for the Ollama /api/chat endpoint and records
+// every request body it receives, so tests can assert on exactly what the
+// shell sends to the model.
+type fakeOllamaChat struct {
+	mu       sync.Mutex
+	requests [][]struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+}
+
+func (f *fakeOllamaChat) handler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	f.requests = append(f.requests, body.Messages)
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"message":{"content":"ok"},"done":true}`)
+}
+
+// TestChatSurvivesLongSession drives 25 chat turns through the router.
+// Before the chatHistory fix, turn 11 onward failed the ChatAgent's
+// history_not_excessive precondition (session history is persisted and
+// unbounded), and every request carried the current message twice — once
+// at the tail of history, once as the user message.
+func TestChatSurvivesLongSession(t *testing.T) {
+	fake := &fakeOllamaChat{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	t.Setenv("CAS_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_BASE_URL", srv.URL)
+
+	sh, _ := newShell(t)
+	sess, err := sh.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const turns = 25
+	for i := 1; i <= turns; i++ {
+		msg := fmt.Sprintf("chat turn %d", i)
+		resp, err := sh.ProcessMessage(context.Background(), sess.ID, msg)
+		if err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+		if resp.ChatReply != "ok" {
+			t.Fatalf("turn %d: expected reply \"ok\", got %q", i, resp.ChatReply)
+		}
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.requests) != turns {
+		t.Fatalf("expected %d LLM requests, got %d", turns, len(fake.requests))
+	}
+
+	last := fake.requests[len(fake.requests)-1]
+	final := fmt.Sprintf("chat turn %d", turns)
+
+	// The current message appears exactly once, as the final user turn.
+	count := 0
+	for _, m := range last {
+		if m.Content == final {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("current message appears %d times in the request, want 1", count)
+	}
+	if last[len(last)-1].Content != final {
+		t.Errorf("final request message is %q, want %q", last[len(last)-1].Content, final)
+	}
+
+	// system + at most 6 history turns + current message.
+	if len(last) > 8 {
+		t.Errorf("request carries %d messages, want <= 8", len(last))
+	}
+
+	// Real context still flows: the immediately preceding turn is present.
+	prev := fmt.Sprintf("chat turn %d", turns-1)
+	found := false
+	for _, m := range last {
+		if m.Content == prev {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("previous turn %q missing from chat context", prev)
 	}
 }

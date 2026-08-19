@@ -131,7 +131,7 @@ func (sh *Shell) handleClose(sess *Session) (*Response, error) {
 func (sh *Shell) handleChat(ctx context.Context, sess *Session, message string) (*Response, error) {
 	result, err := sh.chatAgent.Chat(ctx, agent.ChatRequest{
 		Message:     message,
-		History:     sessionHistory(sess),
+		History:     chatHistory(sess),
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.7,
 	})
@@ -144,7 +144,7 @@ func (sh *Shell) handleChat(ctx context.Context, sess *Session, message string) 
 func (sh *Shell) streamChat(ctx context.Context, sess *Session, message string, onToken func(string)) (*StreamResponse, error) {
 	result, err := sh.chatAgent.Stream(ctx, agent.ChatRequest{
 		Message:     message,
-		History:     sessionHistory(sess),
+		History:     chatHistory(sess),
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.7,
 	}, onToken)
