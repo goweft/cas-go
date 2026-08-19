@@ -264,8 +264,8 @@ func (a *OrchestratorAgent) contract(req OrchestratorRequest, plan *Orchestratio
 		},
 		{
 			Name:        "minimum_workspaces",
-			Description: "orchestration requires at least 2 workspaces",
-			Check:       func() bool { return len(req.Workspaces) >= 2 },
+			Description: "orchestration requires at least 1 workspace",
+			Check:       func() bool { return len(req.Workspaces) >= 1 },
 		},
 		{
 			Name:        "workspaces_have_ids",

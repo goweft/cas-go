@@ -582,3 +582,113 @@ func TestChatSurvivesLongSession(t *testing.T) {
 		t.Errorf("previous turn %q missing from chat context", prev)
 	}
 }
+
+// ── Orchestrate gate (regression: single tool workspace fell to chat) ─
+
+// planEchoLLM serves /api/chat. Requests containing the orchestrator's
+// planning-prompt marker get a one-step plan for wsID; everything else
+// gets a plain chat reply. It records which system prompts it saw.
+type planEchoLLM struct {
+	mu      sync.Mutex
+	wsID    string
+	systems []string
+}
+
+func (f *planEchoLLM) handler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	system := ""
+	if len(body.Messages) > 0 && body.Messages[0].Role == "system" {
+		system = body.Messages[0].Content
+	}
+	f.mu.Lock()
+	f.systems = append(f.systems, system)
+	f.mu.Unlock()
+
+	reply := "ok"
+	if strings.Contains(system, "coordinating a multi-step task") {
+		reply = fmt.Sprintf(`{"steps":[{"workspace_id":%q,"instruction":"list tools"}],"explanation":"single tool step"}`, f.wsID)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc, _ := json.Marshal(map[string]any{
+		"message": map[string]string{"content": reply},
+		"done":    true,
+	})
+	w.Write(enc)
+}
+
+func (f *planEchoLLM) sawPlanningPrompt() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.systems {
+		if strings.Contains(s, "coordinating a multi-step task") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOrchestrateSingleMCPWorkspaceReachesOrchestrator: with exactly one
+// mcp workspace — the state right after a first ingest — the advertised
+// "use this server to <task>" must route to the orchestrator, not fall
+// through to chat. The run then fails at the MCP connection layer
+// (the test workspace has no live connection; completing the call needs
+// one — that boundary is issue #3's territory), and reaching that layer
+// is itself the proof the gate passed.
+func TestOrchestrateSingleMCPWorkspaceReachesOrchestrator(t *testing.T) {
+	fake := &planEchoLLM{wsID: "test-mcp-ws-1"}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	t.Setenv("CAS_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_BASE_URL", srv.URL)
+
+	sh, _ := newShell(t)
+	sess, _ := sh.CreateSession()
+	if _, err := sh.Workspaces().Create("test-mcp-ws-1", "mcp", "MCP: http://fake", "tools", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := sh.ProcessMessage(context.Background(), sess.ID, "use this server to list the available tools")
+	if !fake.sawPlanningPrompt() {
+		t.Fatal("orchestrator planning prompt never requested — message fell through to chat")
+	}
+	if err == nil || !strings.Contains(err.Error(), "no MCP connection") {
+		t.Fatalf("expected the run to reach the MCP connection layer, got: %v", err)
+	}
+}
+
+// TestOrchestrateSingleDocWorkspaceStillFallsToChat: a lone document
+// workspace keeps the old behavior — conversational "use X to Y"
+// phrasings go to chat, not the orchestrator.
+func TestOrchestrateSingleDocWorkspaceStillFallsToChat(t *testing.T) {
+	fake := &planEchoLLM{wsID: "unused"}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	t.Setenv("CAS_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_BASE_URL", srv.URL)
+
+	sh, _ := newShell(t)
+	sess, _ := sh.CreateSession()
+	if _, err := sh.Workspaces().Create("test-doc-ws-1", "document", "Notes", "# Notes", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := sh.ProcessMessage(context.Background(), sess.ID, "use shorter sentences to improve the flow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.sawPlanningPrompt() {
+		t.Error("lone document workspace must not reach the orchestrator")
+	}
+	if resp.Intent != intent.KindChat {
+		t.Errorf("expected KindChat fallback, got %q", resp.Intent)
+	}
+}

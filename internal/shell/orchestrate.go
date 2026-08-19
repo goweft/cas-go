@@ -8,13 +8,13 @@ import (
 	"github.com/goweft/cas/internal/agent"
 	"github.com/goweft/cas/internal/intent"
 	"github.com/goweft/cas/internal/store"
+	"github.com/goweft/cas/internal/workspace"
 )
 
 // handleOrchestrate coordinates a multi-workspace task and persists the run log.
 func (sh *Shell) handleOrchestrate(ctx context.Context, sess *Session, message string) (*Response, error) {
 	active := sh.workspaces.Active()
-	if len(active) < 2 {
-		// Fall through to chat if fewer than 2 workspaces are open
+	if !orchestratable(active) {
 		return sh.handleChat(ctx, sess, message)
 	}
 
@@ -79,7 +79,7 @@ func (sh *Shell) handleOrchestrate(ctx context.Context, sess *Session, message s
 // This is the entry point for the TUI confirm dial — the caller supplies the blocking function.
 func (sh *Shell) OrchestrateConfirm(ctx context.Context, sessID, message string, confirmFn ConfirmFunc) (*Response, error) {
 	active := sh.workspaces.Active()
-	if len(active) < 2 {
+	if !orchestratable(active) {
 		return sh.handleChat(ctx, &Session{ID: sessID}, message)
 	}
 
@@ -228,5 +228,23 @@ func (sh *Shell) ExecuteStep(ctx context.Context, wsID, instruction, priorContex
 		// Persist the edit
 		_, err = sh.workspaces.Update(wsID, ws.Title, result.Content)
 		return result.Content, err
+	}
+}
+
+// orchestratable reports whether orchestration can act on the active set.
+// Zero workspaces has nothing to act on. A single tool-bearing workspace
+// (mcp, web) is exactly the advertised "use this server to <task>" case —
+// the state a user is in right after their first ingest — and must
+// orchestrate rather than silently fall through to the tool-less
+// ChatAgent. A lone document or code workspace keeps the chat fallback so
+// conversational "use X to Y" phrasings behave as they always have.
+func orchestratable(active []*workspace.Workspace) bool {
+	switch len(active) {
+	case 0:
+		return false
+	case 1:
+		return active[0].Type == "mcp" || active[0].Type == "web"
+	default:
+		return true
 	}
 }

@@ -48,15 +48,18 @@ func TestOrchestratorContractEmptyInstruction(t *testing.T) {
 }
 
 func TestOrchestratorContractTooFewWorkspaces(t *testing.T) {
+	// The floor is 1 workspace: a lone tool-bearing workspace is a
+	// legitimate orchestration target (the post-ingest case). Zero
+	// workspaces still violates — nothing to act on.
 	a := agent.NewOrchestratorAgent()
 	_, err := a.Orchestrate(context.Background(), agent.OrchestratorRequest{
 		Instruction: "do something",
-		Workspaces:  testWorkspaces[:1], // only one
+		Workspaces:  nil,
 		Executor:    &mockExecutor{},
 		Autonomy:    agent.AutonomySuggest,
 	})
 	if err == nil {
-		t.Fatal("expected contract violation for < 2 workspaces, got nil")
+		t.Fatal("expected contract violation for 0 workspaces, got nil")
 	}
 	if !strings.Contains(err.Error(), "minimum_workspaces") {
 		t.Errorf("expected minimum_workspaces violation, got: %v", err)
