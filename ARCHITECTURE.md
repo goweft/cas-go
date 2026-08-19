@@ -49,7 +49,7 @@ internal/
   store/      store.go   Store interface (SessionStore).
               sqlite.go  SQLiteStore — production persistence at ~/.cas/cas.db.
               memory.go  MemoryStore — in-memory, used in tests.
-  runner/     runner.go  Sandboxed code execution. Language detection, temp-file
+  runner/     runner.go  Isolated code execution (process-level). Language detection, temp-file
                          write, subprocess with timeout, stdout/stderr capture.
   plugin/     plugin.go  Lua plugin runtime (gopher-lua). Loads ~/.cas/plugins/
                          *.lua. Sandboxed VM; no file I/O, no network.

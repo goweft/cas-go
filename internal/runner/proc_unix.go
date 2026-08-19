@@ -1,4 +1,4 @@
-// Package runner: Unix process-group handling for sandboxed execution.
+// Package runner: Unix process-group handling for isolated execution.
 
 //go:build !windows
 

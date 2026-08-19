@@ -1,4 +1,4 @@
-// Package runner: Windows process handling for sandboxed execution.
+// Package runner: Windows process handling for isolated execution.
 
 //go:build windows
 

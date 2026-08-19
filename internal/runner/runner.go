@@ -1,5 +1,11 @@
-// Package runner executes code workspace content in sandboxed subprocesses.
+// Package runner executes code workspace content in isolated subprocesses.
 // Language is detected from content. Execution is time-bounded.
+//
+// Isolation is process-level: execution timeout, process-group kill,
+// stripped environment, and a temp working directory. It is NOT an
+// OS-level sandbox — executed code runs with the invoking user's file
+// and network access. seccomp/namespace sandboxing is tracked as future
+// hardening; see ARCHITECTURE.md (Code execution).
 package runner
 
 import (

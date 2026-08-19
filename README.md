@@ -107,12 +107,16 @@ A placeholder tab appears immediately on create. Tokens stream into it via a buf
 
 ### Code execution
 
-Say `run it` or `execute` with an active code workspace. CAS detects the language from content (bash, Python, Go, JavaScript, Ruby), writes to a temp file, and executes in a sandboxed subprocess with:
+Say `run it` or `execute` with an active code workspace. CAS detects the language from content (bash, Python, Go, JavaScript, Ruby), writes to a temp file, and executes in an isolated subprocess with:
 
 - Process group isolation — timeout kills the entire tree, not just the leader
 - Environment restriction — only `PATH` is inherited, no secrets leak
 - 30-second default timeout
 - stdout and stderr captured and displayed in the chat panel
+
+This is process-level isolation, not an OS-level sandbox: executed code
+runs with your user's file and network access. OS-level sandboxing
+(seccomp/namespaces) is tracked as future hardening — see ARCHITECTURE.md.
 
 No LLM call is needed — intent detection routes directly to the runner.
 
@@ -232,7 +236,7 @@ internal/
 ├── workspace/   Lifecycle: create, update, undo, close, restore
 ├── shell/       Session manager: ProcessMessage, StreamMessage
 ├── llm/         Ollama, Anthropic, Groq, OpenAI, OpenRouter — streaming/sync, model routing
-├── runner/      Code execution — sandboxed subprocess, timeout, env isolation
+├── runner/      Code execution — isolated subprocess, timeout, env isolation
 ├── plugin/      Lua plugin runtime — sandboxed gopher-lua VM
 ├── mcp/         MCP client — connect, discover tools, call, close (SSE transport)
 ├── webview/     HTTP fetch + HTML parser — title, headings, links, body text
