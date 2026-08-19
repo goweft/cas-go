@@ -3,8 +3,9 @@
 // The WebAgent reasons about what to do with a web page — extract data,
 // summarise, navigate to a linked page, answer questions — and acts
 // according to the autonomy dial. Like MCPAgent, it never leaves its
-// workspace scope and its contract enforces that navigation stays within
-// the session's origin domain (or an explicitly approved URL).
+// workspace scope: its contract enforces that navigation stays within the
+// session's origin or follows a link present on the current page, and the
+// check runs before any fetch — an out-of-scope URL is never requested.
 package agent
 
 import (
@@ -77,19 +78,21 @@ func (a *WebAgent) Act(ctx context.Context, req WebRequest) (*WebResult, error) 
 	// confirm and run: execute the action.
 	switch plan.action {
 	case WebActionNavigate:
+		// Validate the planned URL before the fetch: the postconditions
+		// judge the LLM's plan, and the fetch is the side effect of that
+		// plan — checking afterwards cannot un-send the request.
+		if err := a.contract(req, plan.navigateURL).CheckPostconditions(); err != nil {
+			return nil, err
+		}
 		newPage, err := req.Session.Fetch(ctx, plan.navigateURL)
 		if err != nil {
 			return nil, fmt.Errorf("web-agent: navigate: %w", err)
 		}
-		result := &WebResult{
+		return &WebResult{
 			Action:      WebActionNavigate,
 			NavigateURL: plan.navigateURL,
 			NewPage:     newPage,
-		}
-		if err := a.contract(req, plan.navigateURL).CheckPostconditions(); err != nil {
-			return nil, err
-		}
-		return result, nil
+		}, nil
 
 	default: // answer or extract — no network call
 		result := &WebResult{Action: plan.action, Answer: plan.answer}
@@ -245,6 +248,45 @@ func (a *WebAgent) contract(req WebRequest, navigateURL string) *contract.Contra
 				return err == nil && u.IsAbs()
 			},
 		},
+		{
+			Name:        "navigate_url_in_scope",
+			Description: "navigate_url must share the session's origin or be a link on the current page",
+			Check: func() bool {
+				if navigateURL == "" {
+					return true
+				}
+				return navigateURLInScope(req, navigateURL)
+			},
+		},
 	}
 	return c.Freeze()
+}
+
+// navigateURLInScope reports whether a planned navigation target is
+// permitted: it must share the session's start-URL origin (scheme + host)
+// or appear verbatim among the current page's extracted links (which the
+// webview layer resolves to absolute URLs). The contract runs this before
+// any fetch, so out-of-scope URLs are refused without a request. A URL
+// that merely appears in page text — the prompt-injection channel — is
+// neither, and fails closed.
+func navigateURLInScope(req WebRequest, target string) bool {
+	u, err := url.Parse(target)
+	if err != nil || !u.IsAbs() {
+		return false
+	}
+	if req.Session != nil {
+		if start, err := url.Parse(req.Session.StartURL); err == nil &&
+			strings.EqualFold(u.Scheme, start.Scheme) &&
+			strings.EqualFold(u.Host, start.Host) {
+			return true
+		}
+	}
+	if req.PageState != nil {
+		for _, l := range req.PageState.Links {
+			if l.Href == target {
+				return true
+			}
+		}
+	}
+	return false
 }
