@@ -103,6 +103,9 @@ func discoverTools(ctx context.Context, client *mcpgo.Client) ([]Tool, error) {
 
 // Call invokes a named tool with the given arguments.
 func (c *Connection) Call(ctx context.Context, toolName string, args map[string]interface{}) (*ToolResult, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("mcp call %s: no live client", toolName)
+	}
 	req := mcp.CallToolRequest{}
 	req.Params.Name = toolName
 	req.Params.Arguments = args

@@ -9,7 +9,10 @@
 //   run      — agent executes freely within its workspace scope
 //
 // The agent never calls tools outside its bound connection, and the contract
-// enforces that the tool name exists on the server before execution.
+// enforces that the tool name exists on the server before execution: the
+// LLM's plan is validated against the postconditions first, and only a plan
+// that passes is sent to the connection.  A check that runs after the call
+// would be a comment, not a boundary.
 
 package agent
 
@@ -86,20 +89,23 @@ func (a *MCPAgent) Act(ctx context.Context, req MCPRequest) (*MCPResult, error) 
 		return nil, err
 	}
 
+	// Step 2: validate the plan against the contract BEFORE any side effect.
+	// An invented tool name is refused here and never reaches the server.
+	if err := a.contract(req, toolCall).CheckPostconditions(); err != nil {
+		return nil, err
+	}
+
 	result := &MCPResult{
 		ToolCall:   toolCall,
 		Suggestion: suggestion,
 	}
 
-	// In suggest mode, return the plan without executing it.
+	// In suggest mode, return the validated plan without executing it.
 	if req.Autonomy == AutonomySuggest || toolCall == nil {
-		if err := a.contract(req, toolCall).CheckPostconditions(); err != nil {
-			return nil, err
-		}
 		return result, nil
 	}
 
-	// confirm and run: execute the tool call.
+	// Step 3 (confirm and run): execute the validated tool call.
 	toolResult, err := req.Connection.Call(ctx, toolCall.ToolName, toolCall.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("mcp-agent: tool call failed: %w", err)
@@ -109,9 +115,6 @@ func (a *MCPAgent) Act(ctx context.Context, req MCPRequest) (*MCPResult, error) 
 	}
 
 	result.Output = toolResult.Content
-	if err := a.contract(req, toolCall).CheckPostconditions(); err != nil {
-		return nil, err
-	}
 	return result, nil
 }
 
