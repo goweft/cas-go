@@ -128,6 +128,12 @@ func (m *Manager) Create(id, wsType, title, content, sessionID string) (*Workspa
 }
 
 // Update modifies the title and/or content of an active workspace.
+//
+// Ordering matters: the new values are validated against the contract and
+// persisted BEFORE they are assigned to the in-memory workspace. A rejected
+// or unpersisted update therefore leaves memory identical to the store —
+// the workspace never holds content the contract refused or the database
+// never saw.
 func (m *Manager) Update(id, title, content string) (*Workspace, error) {
 	ws, err := m.get(id)
 	if err != nil {
@@ -142,20 +148,24 @@ func (m *Manager) Update(id, title, content string) (*Workspace, error) {
 		return nil, fmt.Errorf("update blocked by contract: %w", err)
 	}
 
+	newTitle, newContent := ws.Title, ws.Content
 	if title != "" {
-		ws.Title = title
+		newTitle = title
 	}
 	if content != "" {
-		ws.Content = content
+		newContent = content
 	}
 
 	if err := c.CheckPostconditions(); err != nil {
 		return nil, fmt.Errorf("update failed postcondition: %w", err)
 	}
 
-	if err := m.store.UpdateWorkspace(id, ws.Title, ws.Content); err != nil {
+	if err := m.store.UpdateWorkspace(id, newTitle, newContent); err != nil {
 		return nil, err
 	}
+
+	ws.Title = newTitle
+	ws.Content = newContent
 	return ws, nil
 }
 
