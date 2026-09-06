@@ -110,6 +110,33 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if schemaVersion < 3 {
+		if err := s.migrateAddOrchestrationStatus(); err != nil {
+			return fmt.Errorf("migration v3: %w", err)
+		}
+		if _, err := s.db.Exec(`PRAGMA user_version = 3`); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// migrateAddOrchestrationStatus (v3) adds run lifecycle columns so a run is
+// recorded before its steps execute and failed runs/steps are auditable.
+// Pre-v3 runs were only ever written after success, so backfilling
+// status='completed' is exact, not a guess.
+func (s *SQLiteStore) migrateAddOrchestrationStatus() error {
+	stmts := []string{
+		`ALTER TABLE orchestration_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
+		`ALTER TABLE orchestration_runs ADD COLUMN error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE orchestration_steps ADD COLUMN error TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -427,27 +454,45 @@ func (s *SQLiteStore) migrateAddOrchestration() error {
 }
 
 func (s *SQLiteStore) SaveOrchestrationRun(run OrchestrationRunRow) error {
+	status := run.Status
+	if status == "" {
+		status = OrchestrationCompleted
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO orchestration_runs (id, session_id, instruction, summary, step_count, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		run.ID, run.SessionID, run.Instruction, run.Summary, run.StepCount,
+		`INSERT INTO orchestration_runs (id, session_id, instruction, summary, step_count, status, error, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.SessionID, run.Instruction, run.Summary, run.StepCount, status, run.Error,
 		run.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	)
 	return err
 }
 
+func (s *SQLiteStore) UpdateOrchestrationRun(run OrchestrationRunRow) error {
+	res, err := s.db.Exec(
+		`UPDATE orchestration_runs SET summary = ?, step_count = ?, status = ?, error = ? WHERE id = ?`,
+		run.Summary, run.StepCount, run.Status, run.Error, run.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("orchestration run %s not found", run.ID)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) SaveOrchestrationStep(step OrchestrationStepRow) error {
 	_, err := s.db.Exec(
-		`INSERT INTO orchestration_steps (id, run_id, step_number, workspace_id, instruction, output)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		step.ID, step.RunID, step.StepNumber, step.WorkspaceID, step.Instruction, step.Output,
+		`INSERT INTO orchestration_steps (id, run_id, step_number, workspace_id, instruction, output, error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		step.ID, step.RunID, step.StepNumber, step.WorkspaceID, step.Instruction, step.Output, step.Error,
 	)
 	return err
 }
 
 func (s *SQLiteStore) LoadOrchestrationRuns(sessionID string) ([]OrchestrationRunRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, session_id, instruction, summary, step_count, created_at
+		`SELECT id, session_id, instruction, summary, step_count, status, error, created_at
 		 FROM orchestration_runs WHERE session_id = ? ORDER BY created_at ASC`,
 		sessionID,
 	)
@@ -459,7 +504,7 @@ func (s *SQLiteStore) LoadOrchestrationRuns(sessionID string) ([]OrchestrationRu
 	for rows.Next() {
 		var r OrchestrationRunRow
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SessionID, &r.Instruction, &r.Summary, &r.StepCount, &createdAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.SessionID, &r.Instruction, &r.Summary, &r.StepCount, &r.Status, &r.Error, &createdAt); err != nil {
 			return nil, err
 		}
 		r.CreatedAt, _ = time.Parse("2006-01-02T15:04:05Z", createdAt)
@@ -470,7 +515,7 @@ func (s *SQLiteStore) LoadOrchestrationRuns(sessionID string) ([]OrchestrationRu
 
 func (s *SQLiteStore) LoadOrchestrationSteps(runID string) ([]OrchestrationStepRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, run_id, step_number, workspace_id, instruction, output
+		`SELECT id, run_id, step_number, workspace_id, instruction, output, error
 		 FROM orchestration_steps WHERE run_id = ? ORDER BY step_number ASC`,
 		runID,
 	)
@@ -481,7 +526,7 @@ func (s *SQLiteStore) LoadOrchestrationSteps(runID string) ([]OrchestrationStepR
 	var out []OrchestrationStepRow
 	for rows.Next() {
 		var r OrchestrationStepRow
-		if err := rows.Scan(&r.ID, &r.RunID, &r.StepNumber, &r.WorkspaceID, &r.Instruction, &r.Output); err != nil {
+		if err := rows.Scan(&r.ID, &r.RunID, &r.StepNumber, &r.WorkspaceID, &r.Instruction, &r.Output, &r.Error); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

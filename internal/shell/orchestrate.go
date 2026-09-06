@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,78 +12,40 @@ import (
 	"github.com/goweft/cas/internal/workspace"
 )
 
-// handleOrchestrate coordinates a multi-workspace task and persists the run log.
+// handleOrchestrate coordinates a multi-workspace task in run autonomy and
+// persists the run log.
 func (sh *Shell) handleOrchestrate(ctx context.Context, sess *Session, message string) (*Response, error) {
-	active := sh.workspaces.Active()
-	if !orchestratable(active) {
-		return sh.handleChat(ctx, sess, message)
-	}
-
-	// Build WorkspaceInfo for each active workspace
-	wsInfos := make([]agent.WorkspaceInfo, len(active))
-	for i, ws := range active {
-		info := agent.WorkspaceInfo{
-			ID:    ws.ID,
-			Title: ws.Title,
-			Type:  ws.Type,
-		}
-		if conn, ok := sh.mcpConns[ws.ID]; ok {
-			info.ToolSummary = conn.ToolSummary()
-		}
-		if len(ws.Content) > 200 {
-			info.ContentSnip = ws.Content[:200]
-		} else {
-			info.ContentSnip = ws.Content
-		}
-		wsInfos[i] = info
-	}
-
-	// Create a run ID and a logging executor before starting.
-	runID := newID()
-	loggingExec := &loggingExecutor{
-		inner: sh,
-		store: sh.store,
-		runID: runID,
-	}
-
-	result, err := sh.orchestAgent.Orchestrate(ctx, agent.OrchestratorRequest{
-		Instruction: message,
-		Workspaces:  wsInfos,
-		Executor:    loggingExec,
-		Autonomy:    agent.AutonomyRun,
-		UserContext: sh.conductor.UserContext(),
-		Temperature: 0.3,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Persist the run record.
-	run := store.OrchestrationRunRow{
-		ID:          runID,
-		SessionID:   sess.ID,
-		Instruction: message,
-		Summary:     result.Summary,
-		StepCount:   len(result.Plan.Steps),
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := sh.store.SaveOrchestrationRun(run); err != nil {
-		// Non-fatal: log and continue.
-		_ = err
-	}
-
-	return &Response{ChatReply: result.Summary, Intent: intent.KindOrchestrate}, nil
+	return sh.runOrchestration(ctx, sess, message, nil)
 }
 
 // OrchestrateConfirm runs orchestration with confirm-mode autonomy.
 // The confirmFn is called before each step; it blocks until the user approves or skips.
 // This is the entry point for the TUI confirm dial — the caller supplies the blocking function.
 func (sh *Shell) OrchestrateConfirm(ctx context.Context, sessID, message string, confirmFn ConfirmFunc) (*Response, error) {
+	return sh.runOrchestration(ctx, &Session{ID: sessID}, message, confirmFn)
+}
+
+// runOrchestration is the single orchestration path behind both autonomy
+// modes. A nil confirmFn means run autonomy; otherwise every step is gated
+// through confirmFn.
+//
+// Audit ordering is a contract of this function, not a courtesy:
+//   - the run row is inserted with StatusRunning BEFORE any step executes;
+//     if that insert fails the orchestration is refused, because a side
+//     effect with no audit anchor is unaccountable;
+//   - every attempted step is recorded, including the one that failed
+//     (with its error); if a step cannot be recorded the plan is aborted;
+//   - the run row is finalized to Completed or Failed afterwards. A
+//     finalization failure after a completed run is surfaced to the caller
+//     rather than swallowed — the side effects happened, and the user should
+//     know their record is incomplete.
+func (sh *Shell) runOrchestration(ctx context.Context, sess *Session, message string, confirmFn ConfirmFunc) (*Response, error) {
 	active := sh.workspaces.Active()
 	if !orchestratable(active) {
-		return sh.handleChat(ctx, &Session{ID: sessID}, message)
+		return sh.handleChat(ctx, sess, message)
 	}
 
+	// Build WorkspaceInfo for each active workspace
 	wsInfos := make([]agent.WorkspaceInfo, len(active))
 	for i, ws := range active {
 		info := agent.WorkspaceInfo{ID: ws.ID, Title: ws.Title, Type: ws.Type}
@@ -97,31 +60,50 @@ func (sh *Shell) OrchestrateConfirm(ctx context.Context, sessID, message string,
 		wsInfos[i] = info
 	}
 
-	runID := newID()
-	loggingExec := &loggingExecutor{inner: sh, store: sh.store, runID: runID}
-	exec := &confirmingExecutor{inner: loggingExec, confirm: confirmFn}
+	// Anchor the audit record before the first side effect.
+	run := store.OrchestrationRunRow{
+		ID:          newID(),
+		SessionID:   sess.ID,
+		Instruction: message,
+		Status:      store.OrchestrationRunning,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := sh.store.SaveOrchestrationRun(run); err != nil {
+		return nil, fmt.Errorf("orchestration refused: cannot record run before executing: %w", err)
+	}
+
+	loggingExec := &loggingExecutor{inner: sh, store: sh.store, runID: run.ID}
+	var exec agent.StepExecutor = loggingExec
+	autonomy := agent.AutonomyRun
+	if confirmFn != nil {
+		exec = &confirmingExecutor{inner: loggingExec, confirm: confirmFn}
+		autonomy = agent.AutonomyConfirm
+	}
 
 	result, err := sh.orchestAgent.Orchestrate(ctx, agent.OrchestratorRequest{
 		Instruction: message,
 		Workspaces:  wsInfos,
 		Executor:    exec,
-		Autonomy:    agent.AutonomyConfirm,
+		Autonomy:    autonomy,
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.3,
 	})
 	if err != nil {
+		run.Status = store.OrchestrationFailed
+		run.Error = err.Error()
+		run.StepCount = loggingExec.stepCount
+		if uerr := sh.store.UpdateOrchestrationRun(run); uerr != nil {
+			return nil, errors.Join(err, fmt.Errorf("orchestration audit record could not be finalized: %w", uerr))
+		}
 		return nil, err
 	}
 
-	run := store.OrchestrationRunRow{
-		ID:          runID,
-		SessionID:   sessID,
-		Instruction: message,
-		Summary:     result.Summary,
-		StepCount:   len(result.Plan.Steps),
-		CreatedAt:   time.Now().UTC(),
+	run.Status = store.OrchestrationCompleted
+	run.Summary = result.Summary
+	run.StepCount = loggingExec.stepCount
+	if err := sh.store.UpdateOrchestrationRun(run); err != nil {
+		return nil, fmt.Errorf("orchestration completed but its audit record could not be finalized: %w", err)
 	}
-	_ = sh.store.SaveOrchestrationRun(run)
 
 	return &Response{ChatReply: result.Summary, Intent: intent.KindOrchestrate}, nil
 }
@@ -134,12 +116,13 @@ type loggingExecutor struct {
 	stepCount int
 }
 
+// ExecuteStep runs one step and records it — success or failure. The step
+// row is written after the step's side effect (it records the outcome), but
+// a failure to write it aborts the plan: the next side effect does not run
+// without its predecessor on record.
 func (e *loggingExecutor) ExecuteStep(ctx context.Context, wsID, instruction, priorContext string) (string, error) {
 	e.stepCount++
 	output, err := e.inner.ExecuteStep(ctx, wsID, instruction, priorContext)
-	if err != nil {
-		return "", err
-	}
 	step := store.OrchestrationStepRow{
 		ID:          newID(),
 		RunID:       e.runID,
@@ -148,8 +131,19 @@ func (e *loggingExecutor) ExecuteStep(ctx context.Context, wsID, instruction, pr
 		Instruction: instruction,
 		Output:      output,
 	}
-	// Non-fatal if persistence fails.
-	_ = e.store.SaveOrchestrationStep(step)
+	if err != nil {
+		step.Output = ""
+		step.Error = err.Error()
+	}
+	if serr := e.store.SaveOrchestrationStep(step); serr != nil {
+		if err != nil {
+			return "", errors.Join(err, fmt.Errorf("step %d could not be recorded: %w", e.stepCount, serr))
+		}
+		return "", fmt.Errorf("step %d executed but could not be recorded; aborting plan: %w", e.stepCount, serr)
+	}
+	if err != nil {
+		return "", err
+	}
 	return output, nil
 }
 

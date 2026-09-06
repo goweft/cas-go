@@ -181,6 +181,21 @@ func (m *MemoryStore) SaveOrchestrationRun(run OrchestrationRunRow) error {
 	return nil
 }
 
+func (m *MemoryStore) UpdateOrchestrationRun(run OrchestrationRunRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.orchRuns {
+		if m.orchRuns[i].ID == run.ID {
+			m.orchRuns[i].Summary = run.Summary
+			m.orchRuns[i].StepCount = run.StepCount
+			m.orchRuns[i].Status = run.Status
+			m.orchRuns[i].Error = run.Error
+			return nil
+		}
+	}
+	return fmt.Errorf("orchestration run %s not found", run.ID)
+}
+
 func (m *MemoryStore) SaveOrchestrationStep(step OrchestrationStepRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

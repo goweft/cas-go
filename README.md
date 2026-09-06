@@ -173,7 +173,7 @@ This feeds back into LLM system prompts automatically. More sessions → better 
 
 ### Persistence
 
-SQLite (WAL mode) at `~/.cas/cas.db`. Sessions, workspaces, and conversation history survive restarts. Previous workspaces restore as tabs on next launch. Full version history per workspace enables multi-step undo. Orchestration runs and their per-step inputs/outputs are persisted for a complete audit trail. Schema migrations run automatically via `PRAGMA user_version`.
+SQLite (WAL mode) at `~/.cas/cas.db`. Sessions, workspaces, and conversation history survive restarts. Previous workspaces restore as tabs on next launch. Full version history per workspace enables multi-step undo. Orchestration runs are recorded before their first step executes and finalized as completed or failed afterwards; every attempted step is persisted with its output or its error, so partial and failed runs are auditable, not just successful ones. Schema migrations run automatically via `PRAGMA user_version`.
 
 ---
 
