@@ -21,8 +21,40 @@ func (sh *Shell) handleOrchestrate(ctx context.Context, sess *Session, message s
 // OrchestrateConfirm runs orchestration with confirm-mode autonomy.
 // The confirmFn is called before each step; it blocks until the user approves or skips.
 // This is the entry point for the TUI confirm dial — the caller supplies the blocking function.
+//
+// It is a full turn of the message pipeline, not a side door: the session is
+// looked up (not fabricated), the user turn is persisted before dispatch, the
+// reply is persisted after, and the conductor observes the turn — exactly what
+// ProcessMessage does for the same intent. Anything less leaves later chats
+// with no record that the orchestration happened.
 func (sh *Shell) OrchestrateConfirm(ctx context.Context, sessID, message string, confirmFn ConfirmFunc) (*Response, error) {
-	return sh.runOrchestration(ctx, &Session{ID: sessID}, message, confirmFn)
+	sess, err := sh.GetSession(sessID)
+	if err != nil {
+		return nil, err
+	}
+
+	userMsg := sess.addMessage("user", message)
+	if err := sh.store.SaveMessage(toStoreMsg(userMsg)); err != nil {
+		return nil, err
+	}
+
+	resp, err := sh.runOrchestration(ctx, sess, message, confirmFn)
+	if err != nil {
+		return nil, err
+	}
+
+	shellMsg := sess.addMessage("shell", resp.ChatReply)
+	if err := sh.store.SaveMessage(toStoreMsg(shellMsg)); err != nil {
+		return nil, err
+	}
+
+	wsTitle, wsType := "", ""
+	if resp.Workspace != nil {
+		wsTitle, wsType = resp.Workspace.Title, resp.Workspace.Type
+	}
+	sh.conductor.Observe(string(intent.KindOrchestrate), message, wsTitle, wsType)
+
+	return resp, nil
 }
 
 // runOrchestration is the single orchestration path behind both autonomy
