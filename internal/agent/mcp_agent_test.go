@@ -35,6 +35,9 @@ func TestMCPAgentUnknownToolRefusedBeforeCall(t *testing.T) {
 				Instruction: "clean up",
 				Connection:  offlineConn(),
 				Autonomy:    mode,
+				// confirm mode now requires a confirmer; approve everything so
+				// the only thing that can stop the call is the contract.
+				Confirm: func(agent.ActionPreview) bool { return true },
 			})
 			if err == nil {
 				t.Fatal("expected contract violation for unknown tool, got nil")

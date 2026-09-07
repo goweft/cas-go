@@ -104,18 +104,23 @@ func (sh *Shell) runOrchestration(ctx context.Context, sess *Session, message st
 		return nil, fmt.Errorf("orchestration refused: cannot record run before executing: %w", err)
 	}
 
-	loggingExec := &loggingExecutor{inner: sh, store: sh.store, runID: run.ID}
-	var exec agent.StepExecutor = loggingExec
+	// A nil confirmFn runs every step; otherwise steps are gated — tool
+	// steps on the concrete action (see executeStep), edit steps on the
+	// step description.
+	loggingExec := &loggingExecutor{
+		inner: &stepExecutor{sh: sh, confirm: confirmFn},
+		store: sh.store,
+		runID: run.ID,
+	}
 	autonomy := agent.AutonomyRun
 	if confirmFn != nil {
-		exec = &confirmingExecutor{inner: loggingExec, confirm: confirmFn}
 		autonomy = agent.AutonomyConfirm
 	}
 
 	result, err := sh.orchestAgent.Orchestrate(ctx, agent.OrchestratorRequest{
 		Instruction: message,
 		Workspaces:  wsInfos,
-		Executor:    exec,
+		Executor:    loggingExec,
 		Autonomy:    autonomy,
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.3,
@@ -179,32 +184,44 @@ func (e *loggingExecutor) ExecuteStep(ctx context.Context, wsID, instruction, pr
 	return output, nil
 }
 
-// ConfirmFunc is called before each step in confirm-autonomy orchestration.
-// It should block until the user responds and return true to proceed or false to skip.
-// The UI wires this to the FocusConfirm TUI state.
+// ConfirmFunc is called in confirm-autonomy orchestration before each side
+// effect. It receives a human-readable description of exactly what is about
+// to happen and should block until the user responds, returning true to
+// proceed or false to skip. The UI wires this to the FocusConfirm TUI state.
 type ConfirmFunc func(description string) bool
 
-// confirmingExecutor wraps a loggingExecutor and pauses before each step for user approval.
-type confirmingExecutor struct {
-	inner   *loggingExecutor
-	confirm ConfirmFunc
+// stepExecutor routes orchestration steps to the shell with an optional
+// confirm gate. It exists so the gate travels with the step into the agent
+// that performs the side effect, instead of stopping at the step boundary.
+type stepExecutor struct {
+	sh      *Shell
+	confirm ConfirmFunc // nil = run autonomy
 }
 
-func (e *confirmingExecutor) ExecuteStep(ctx context.Context, wsID, instruction, priorContext string) (string, error) {
-	desc := fmt.Sprintf("[%s] %s", wsID, instruction)
-	if len(desc) > 120 {
-		desc = desc[:117] + "..."
-	}
-	if !e.confirm(desc) {
-		// User skipped this step — return empty output and continue plan.
-		return "(skipped)", nil
-	}
-	return e.inner.ExecuteStep(ctx, wsID, instruction, priorContext)
+func (e *stepExecutor) ExecuteStep(ctx context.Context, wsID, instruction, priorContext string) (string, error) {
+	return e.sh.executeStep(ctx, wsID, instruction, priorContext, e.confirm)
 }
 
-// ExecuteStep implements agent.StepExecutor.
-// Routes a single orchestration step to the appropriate agent based on workspace type.
+// ExecuteStep implements agent.StepExecutor in run autonomy.
 func (sh *Shell) ExecuteStep(ctx context.Context, wsID, instruction, priorContext string) (string, error) {
+	return sh.executeStep(ctx, wsID, instruction, priorContext, nil)
+}
+
+// executeStep routes a single orchestration step to the appropriate agent
+// based on workspace type.
+//
+// What confirm autonomy asks the user to approve depends on where the side
+// effect is:
+//   - mcp and web steps: the CONCRETE action — tool name with its full
+//     arguments, or the exact URL — as planned by the nested agent and
+//     validated by its contract. The step's English instruction is not shown
+//     for approval, because approving it would approve nothing: the tool and
+//     arguments are chosen afterwards. Declining skips the step; the plan
+//     continues.
+//   - document/code/list steps: the step itself. The side effect is a local,
+//     versioned workspace edit whose content only exists after the LLM call;
+//     it is undoable and never leaves the machine.
+func (sh *Shell) executeStep(ctx context.Context, wsID, instruction, priorContext string, confirm ConfirmFunc) (string, error) {
 	ws, err := sh.workspaces.Get(wsID)
 	if err != nil || ws == nil {
 		return "", fmt.Errorf("workspace %q not found", wsID)
@@ -216,20 +233,36 @@ func (sh *Shell) ExecuteStep(ctx context.Context, wsID, instruction, priorContex
 		fullInstruction = priorContext + "\n\n" + instruction
 	}
 
+	autonomy := agent.AutonomyRun
+	var actionConfirm agent.ActionConfirmer
+	if confirm != nil {
+		autonomy = agent.AutonomyConfirm
+		actionConfirm = func(p agent.ActionPreview) bool {
+			// Full preview, never truncated: the arguments ARE the action.
+			return confirm(fmt.Sprintf("[%s] %s", wsID, p.String()))
+		}
+	}
+
 	switch ws.Type {
 	case "mcp":
-		result, err := sh.HandleMCPAction(ctx, wsID, fullInstruction, agent.AutonomyRun)
+		result, err := sh.HandleMCPAction(ctx, wsID, fullInstruction, autonomy, actionConfirm)
 		if err != nil {
 			return "", err
+		}
+		if result.Declined {
+			return fmt.Sprintf("(skipped: %s)", agent.ActionPreview{Kind: agent.ActionMCPTool, ToolName: result.ToolCall.ToolName, Arguments: result.ToolCall.Arguments}), nil
 		}
 		if result.Output != "" {
 			return result.Output, nil
 		}
 		return result.Suggestion, nil
 	case "web":
-		result, err := sh.HandleWebAction(ctx, wsID, fullInstruction, agent.AutonomyRun)
+		result, err := sh.HandleWebAction(ctx, wsID, fullInstruction, autonomy, actionConfirm)
 		if err != nil {
 			return "", err
+		}
+		if result.Declined {
+			return fmt.Sprintf("(skipped: %s)", agent.ActionPreview{Kind: agent.ActionWebNavigate, URL: result.NavigateURL}), nil
 		}
 		if result.Answer != "" {
 			return result.Answer, nil
@@ -239,6 +272,9 @@ func (sh *Shell) ExecuteStep(ctx context.Context, wsID, instruction, priorContex
 		}
 		return "", nil
 	default:
+		if confirm != nil && !confirm(fmt.Sprintf("[%s] edit %s workspace %q: %s", wsID, ws.Type, ws.Title, instruction)) {
+			return "(skipped)", nil
+		}
 		// For document/code/list workspaces: use EditAgent to apply the instruction
 		result, err := sh.editAgent.Edit(ctx, agent.EditRequest{
 			WSType:         ws.Type,

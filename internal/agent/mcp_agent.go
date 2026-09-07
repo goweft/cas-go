@@ -5,7 +5,8 @@
 // is governed by the workspace autonomy dial:
 //
 //   suggest  — agent produces a tool-call suggestion; user must confirm
-//   confirm  — agent executes but records every action for audit
+//   confirm  — agent plans, validates, then asks the Confirm callback to
+//              approve the concrete tool call (name + arguments) before executing
 //   run      — agent executes freely within its workspace scope
 //
 // The agent never calls tools outside its bound connection, and the contract
@@ -35,8 +36,10 @@ const (
 	// to the user before any tool is called.
 	AutonomySuggest Autonomy = "suggest"
 
-	// AutonomyConfirm — agent calls tools but every call is logged and the
-	// result is surfaced to the user before continuing.
+	// AutonomyConfirm — the agent plans and validates the concrete action,
+	// then asks the request's Confirm callback (tool name + arguments, or
+	// exact URL) before executing it. A request in this mode without a
+	// Confirm callback fails its precondition.
 	AutonomyConfirm Autonomy = "confirm"
 
 	// AutonomyRun — agent calls tools freely within its workspace scope.
@@ -48,12 +51,17 @@ type MCPRequest struct {
 	Instruction string                // what the user asked
 	Connection  *mcpclient.Connection // the bound MCP server
 	Autonomy    Autonomy
+	Confirm     ActionConfirmer // required when Autonomy == AutonomyConfirm
 	UserContext string
 	Temperature float64
 }
 
 // MCPResult is the output from MCPAgent.
 type MCPResult struct {
+	// Declined is set in confirm autonomy when the user refused the concrete
+	// tool call. ToolCall and Suggestion still describe what was planned;
+	// nothing was executed.
+	Declined bool
 	// ToolCall is set when the agent decided to call a tool (all autonomy levels).
 	ToolCall *MCPToolCall
 	// Output is the tool's response (empty in suggest mode — tool not yet called).
@@ -105,7 +113,16 @@ func (a *MCPAgent) Act(ctx context.Context, req MCPRequest) (*MCPResult, error) 
 		return result, nil
 	}
 
-	// Step 3 (confirm and run): execute the validated tool call.
+	// Step 3 (confirm): the user approves THIS call — name and arguments —
+	// not the instruction that produced it.
+	if req.Autonomy == AutonomyConfirm {
+		if !req.Confirm(ActionPreview{Kind: ActionMCPTool, ToolName: toolCall.ToolName, Arguments: toolCall.Arguments}) {
+			result.Declined = true
+			return result, nil
+		}
+	}
+
+	// Step 4 (confirm and run): execute the validated tool call.
 	toolResult, err := req.Connection.Call(ctx, toolCall.ToolName, toolCall.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("mcp-agent: tool call failed: %w", err)
@@ -216,6 +233,11 @@ func (a *MCPAgent) contract(req MCPRequest, toolCall *MCPToolCall) *contract.Con
 					req.Autonomy == AutonomyConfirm ||
 					req.Autonomy == AutonomyRun
 			},
+		},
+		{
+			Name:        "confirm_mode_has_confirmer",
+			Description: "confirm autonomy requires a Confirm callback to approve the concrete tool call",
+			Check:       func() bool { return req.Autonomy != AutonomyConfirm || req.Confirm != nil },
 		},
 	}
 	c.Postconditions = []contract.Rule{

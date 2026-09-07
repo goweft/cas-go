@@ -41,8 +41,9 @@ func (sh *Shell) handleIngest(ctx context.Context, sess *Session, in intent.Inte
 }
 
 // HandleMCPAction executes a user instruction against the MCP workspace.
-// Called by the shell when the active workspace is type "mcp".
-func (sh *Shell) HandleMCPAction(ctx context.Context, wsID, instruction string, autonomy agent.Autonomy) (*agent.MCPResult, error) {
+// Called by the shell when the active workspace is type "mcp". In confirm
+// autonomy the agent asks confirm to approve the concrete tool call.
+func (sh *Shell) HandleMCPAction(ctx context.Context, wsID, instruction string, autonomy agent.Autonomy, confirm agent.ActionConfirmer) (*agent.MCPResult, error) {
 	conn, ok := sh.mcpConns[wsID]
 	if !ok {
 		return nil, fmt.Errorf("no MCP connection for workspace %q", wsID)
@@ -51,6 +52,7 @@ func (sh *Shell) HandleMCPAction(ctx context.Context, wsID, instruction string, 
 		Instruction: instruction,
 		Connection:  conn,
 		Autonomy:    autonomy,
+		Confirm:     confirm,
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.3,
 	})
@@ -131,7 +133,10 @@ func (sh *Shell) handleBrowse(ctx context.Context, sess *Session, in intent.Inte
 }
 
 // HandleWebAction executes a user instruction against a web workspace.
-func (sh *Shell) HandleWebAction(ctx context.Context, wsID, instruction string, autonomy agent.Autonomy) (*agent.WebResult, error) {
+// HandleWebAction executes a user instruction against the web workspace.
+// In confirm autonomy the agent asks confirm to approve the exact URL
+// before any fetch.
+func (sh *Shell) HandleWebAction(ctx context.Context, wsID, instruction string, autonomy agent.Autonomy, confirm agent.ActionConfirmer) (*agent.WebResult, error) {
 	sess, ok := sh.webSessions[wsID]
 	if !ok {
 		return nil, fmt.Errorf("no web session for workspace %q", wsID)
@@ -145,6 +150,7 @@ func (sh *Shell) HandleWebAction(ctx context.Context, wsID, instruction string, 
 		Session:     sess,
 		PageState:   page,
 		Autonomy:    autonomy,
+		Confirm:     confirm,
 		UserContext: sh.conductor.UserContext(),
 		Temperature: 0.3,
 	})

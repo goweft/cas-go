@@ -213,6 +213,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmDescription = msg.Description
 		m.confirmCh = msg.Ch
 		m.status = ""
+		// The full action goes into the conversation pane, untruncated: for
+		// tool calls the arguments are the action, and the status bar is
+		// too narrow to carry them. The status bar shows a short cue.
+		m.messages = append(m.messages, shell.Message{Role: "shell", Text: "confirm? " + msg.Description})
 		return m, listenStream(m.streamCh)
 	}
 
@@ -949,7 +953,7 @@ func (m Model) renderStatus() string {
 	case FocusConfirm:
 		desc := m.confirmDescription
 		if len(desc) > 60 {
-			desc = desc[:57] + "..."
+			desc = desc[:57] + "… (full action shown above)"
 		}
 		return "  " + strings.Join([]string{
 			styleEditBadge.Render("CONFIRM"),

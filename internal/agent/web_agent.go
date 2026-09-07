@@ -38,12 +38,17 @@ type WebRequest struct {
 	Session     *webview.Session
 	PageState   *webview.PageState // current page snapshot
 	Autonomy    Autonomy
+	Confirm     ActionConfirmer // required when Autonomy == AutonomyConfirm
 	UserContext string
 	Temperature float64
 }
 
 // WebResult is the output from WebAgent.
 type WebResult struct {
+	// Declined is set in confirm autonomy when the user refused the concrete
+	// navigation. Action and NavigateURL still describe the plan; no fetch
+	// was made.
+	Declined    bool
 	Action      WebAction
 	Answer      string             // populated for WebActionAnswer and WebActionExtract
 	NavigateURL string             // populated for WebActionNavigate
@@ -86,6 +91,12 @@ func (a *WebAgent) Act(ctx context.Context, req WebRequest) (*WebResult, error) 
 		// plan — checking afterwards cannot un-send the request.
 		if err := a.contract(req, plan.navigateURL).CheckPostconditions(); err != nil {
 			return nil, err
+		}
+		// Confirm autonomy: the user approves THIS URL, not the instruction.
+		if req.Autonomy == AutonomyConfirm {
+			if !req.Confirm(ActionPreview{Kind: ActionWebNavigate, URL: plan.navigateURL}) {
+				return &WebResult{Declined: true, Action: WebActionNavigate, NavigateURL: plan.navigateURL}, nil
+			}
 		}
 		newPage, err := req.Session.FetchWithPolicy(ctx, plan.navigateURL, func(u *url.URL) error {
 			if !navigateURLInScope(req, u.String()) {
@@ -242,6 +253,11 @@ func (a *WebAgent) contract(req WebRequest, navigateURL string) *contract.Contra
 					req.Autonomy == AutonomyConfirm ||
 					req.Autonomy == AutonomyRun
 			},
+		},
+		{
+			Name:        "confirm_mode_has_confirmer",
+			Description: "confirm autonomy requires a Confirm callback to approve the concrete navigation",
+			Check:       func() bool { return req.Autonomy != AutonomyConfirm || req.Confirm != nil },
 		},
 	}
 	c.Postconditions = []contract.Rule{

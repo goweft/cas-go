@@ -91,7 +91,7 @@ Contracts run in Go, external to the model. The model cannot modify, bypass, or 
 
 Every LLM call is owned by a named agent (`GenerationAgent`, `EditAgent`, `CombineAgent`, `ChatAgent`, `MCPAgent`, `WebAgent`, `OrchestratorAgent`). Contracts are frozen before the LLM call and checked again after. The shell delegates to agents and has no remaining LLM call sites — it only routes.
 
-`MCPAgent` and `WebAgent` operate under an **autonomy dial** (`suggest` / `confirm` / `run`) that governs whether actions are planned only, executed with confirmation, or executed freely within their workspace scope. The contract enforces that any tool or URL used exists on the bound server or page — the agent cannot reach outside its workspace.
+`MCPAgent` and `WebAgent` operate under an **autonomy dial** (`suggest` / `confirm` / `run`) that governs whether actions are planned only, executed after the user approves the concrete action (the tool name with its full arguments, or the exact URL — never just the instruction that led to it), or executed freely within their workspace scope. The contract enforces that any tool or URL used exists on the bound server or page — the agent cannot reach outside its workspace.
 
 ### Three workspace types
 
@@ -357,10 +357,14 @@ browse https://golang.org
 #   passes each step's output as context to the next
 ```
 
-In confirm mode the TUI pauses before each step and prompts for approval
-(`y` proceed / `n` skip / `esc` cancel). Every run and its per-step
-inputs and outputs are persisted, so any multi-workspace task is fully
-auditable and replayable.
+In confirm mode the TUI pauses before each side effect and prompts for
+approval (`y` proceed / `n` skip / `esc` cancel). For MCP and web steps
+the prompt is the concrete action the agent has planned and the contract
+has validated — the tool name and its full arguments, or the exact URL —
+not the step's instruction. Every run is recorded before its first step
+and finalized as completed or failed; each attempted step is persisted
+with its output or its error, so partial and failed runs are auditable
+too.
 
 ### Reconnect a stale workspace
 
