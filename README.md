@@ -247,7 +247,7 @@ tests/tui/       TUI integration tests (spawn real binary via tmux)
 cmd/cas/         Entry point: --db, --memory, --providers, --version flags
 ```
 
-**258 tests** across all packages. **8 TUI integration tests** that spawn the real binary in tmux and interact with it as a user would — catching runtime bugs that unit tests miss.
+**280 tests** across all packages. **8 TUI integration tests** that spawn the real binary in tmux and interact with it as a user would — catching runtime bugs that unit tests miss.
 
 For the design rationale behind this layout — why the shell makes no LLM calls, how contracts
 are enforced, how workspaces are modelled — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
